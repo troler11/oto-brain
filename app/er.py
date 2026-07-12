@@ -6059,3 +6059,138 @@ def processar_encerramento_e_pedido_humano(
         base=base, intencao_rapida=intencao_rapida, rota_agente=rota_agente,
         deve_encerrar_triagem=deve_encerrar_triagem,
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# ORQUESTRADOR: encadeia as 14 partes na mesma ordem do node original
+# ---------------------------------------------------------------------------------------------
+
+@dataclass
+class ResultadoER:
+    base: dict
+    intencao_rapida: str
+    rota_agente: int
+    texto_usuario: str
+    ia_output: dict
+    telefone: str
+    motivo_humano: str | None = None
+    deve_resetar_agradecimento: bool = False
+    deve_encerrar_triagem: bool = False
+
+
+def processar(
+    base: dict,
+    mensagem_agrupada: str,
+    ai_agent_json: dict | None,
+    whatsapp_info: dict | None,
+    has_media: bool = False,
+) -> ResultadoER:
+    """Encadeia `processar_intake` (Parte 1) até `processar_encerramento_e_pedido_humano`
+    (Parte 14) na mesma ordem sequencial do node JS original — cada parte recebe o `base`/
+    `intencao_rapida`/`rota_agente`/`ia_output` já mutado pela anterior, igual ao script único
+    do n8n.
+
+    Duas pequenas expressões que o JS calcula localmente ANTES de chamar as partes internas
+    (`all_coleta_confirmed` — usada dentro da Parte 3 mas também precisa estar disponível pra
+    Parte 4 — e a variante estrita de `identidade_incompleta` da Parte 3, usada pela Parte 6) são
+    recomputadas aqui com a MESMA fórmula, em vez de expostas nos dataclasses de resultado — são
+    funções puras do `base` já mutado, então recomputar é equivalente e evita inchar os
+    dataclasses das Partes 3/6 só para o orquestrador.
+
+    NÃO computa `deve_resetar_sessao` nem o `_shadow_check` do node original: o primeiro depende
+    de `_deveRecusarCancel` (variável interna da Parte 6, ainda não exposta) e o segundo lê ao
+    vivo o nó n8n "Triagem Determinística (Pre-IA)", que não existe fora do n8n. Isso é
+    fiação de Fase 2 (cutover), não lógica de roteamento — ver plano de migração.
+    """
+    r1 = processar_intake(base, mensagem_agrupada, ai_agent_json, whatsapp_info, has_media)
+    base, texto_usuario, ia_output = r1.base, r1.texto_usuario, r1.ia_output
+    intencao_rapida, rota_agente = r1.intencao_rapida, r1.rota_agente
+
+    r2 = processar_identidade(
+        base, texto_usuario, intencao_rapida, rota_agente, ia_output,
+        r1.eh_cancel_real, r1.eh_mensagem_informativa, r1.motivo_humano,
+    )
+    base, intencao_rapida, rota_agente = r2.base, r2.intencao_rapida, r2.rota_agente
+
+    r3 = processar_convenio_menu_agenda(
+        base, texto_usuario, intencao_rapida, rota_agente, ia_output,
+        r1.eh_cancel_real, r1.eh_sessao_nova, r1.menu_opt, r1.ia_rota_original, r2.motivo_humano,
+    )
+    base, intencao_rapida, rota_agente = r3.base, r3.intencao_rapida, r3.rota_agente
+    sub_rota_agenda, esta_em_agenda_ativa = r3.sub_rota_agenda, r3.esta_em_agenda_ativa
+
+    conv_valido_orq = (base.get("coleta_convenio") or "") != "" and base.get("coleta_convenio") not in _CONV_PENDENTES
+    all_coleta_confirmed = (
+        conv_valido_orq
+        and (base.get("coleta_data") or "") != ""
+        and (base.get("coleta_unidade") or "") != ""
+        and (base.get("coleta_periodo") or "") != ""
+    )
+
+    r4 = processar_sub_rota_agenda(
+        base, texto_usuario, intencao_rapida, rota_agente, ia_output,
+        r1.eh_cancel_real, r1.eh_pergunta_ver, r1.eh_mensagem_informativa,
+        all_coleta_confirmed, esta_em_agenda_ativa, sub_rota_agenda,
+    )
+    base, intencao_rapida, rota_agente = r4.base, r4.intencao_rapida, r4.rota_agente
+
+    r5 = processar_troca_unidade_medico(
+        base, texto_usuario, intencao_rapida, rota_agente, ia_output,
+        r1.eh_cancel_real, r1.eh_mensagem_informativa,
+    )
+    base, intencao_rapida, rota_agente = r5.base, r5.intencao_rapida, r5.rota_agente
+
+    identidade_incompleta_orq = not base.get("paciente_encontrado") and (
+        not (base.get("nome_dependente") or "").strip()
+        or not (base.get("cpf_dependente") or "").strip()
+        or not (base.get("nascimento_dependente") or "").strip()
+    )
+
+    r6 = processar_medico_dia_periodo(
+        base, texto_usuario, intencao_rapida, rota_agente, ia_output, identidade_incompleta_orq,
+    )
+    base, intencao_rapida, rota_agente = r6.base, r6.intencao_rapida, r6.rota_agente
+
+    r7 = processar_dia_periodo_avancado(base, texto_usuario, intencao_rapida, rota_agente, ia_output)
+    base, intencao_rapida, rota_agente = r7.base, r7.intencao_rapida, r7.rota_agente
+
+    r8 = processar_menu_unidade_medico(
+        base, texto_usuario, intencao_rapida, rota_agente, ia_output, r1.eh_cancel_real, esta_em_agenda_ativa,
+    )
+    base, intencao_rapida, rota_agente = r8.base, r8.intencao_rapida, r8.rota_agente
+
+    r9 = processar_menu_p3_e_faq(
+        base, texto_usuario, intencao_rapida, rota_agente, ia_output,
+        r1.sessao_era_agenda_com_coleta, r1.tem_identidade_em_andamento, r1.tem_terceiro_completo,
+    )
+    base, intencao_rapida, rota_agente = r9.base, r9.intencao_rapida, r9.rota_agente
+
+    r10 = processar_convenio_e_dia_deterministico(base, texto_usuario, intencao_rapida, rota_agente)
+    base, intencao_rapida, rota_agente = r10.base, r10.intencao_rapida, r10.rota_agente
+
+    r11 = processar_convenio_omint_e_ultimo(base, texto_usuario, intencao_rapida, rota_agente, ia_output)
+    base, intencao_rapida, rota_agente = r11.base, r11.intencao_rapida, r11.rota_agente
+
+    r12 = processar_particular_dados_med_triagem(
+        base, texto_usuario, intencao_rapida, rota_agente, ia_output,
+        r1.eh_texto_terceiro, r1.eh_mensagem_informativa, r1.eh_sessao_nova, r9.faq_tag,
+    )
+    base, intencao_rapida, rota_agente = r12.base, r12.intencao_rapida, r12.rota_agente
+
+    r13 = processar_agradecimento_triagem_multidados(base, texto_usuario, intencao_rapida, rota_agente, ia_output)
+    base, intencao_rapida, rota_agente = r13.base, r13.intencao_rapida, r13.rota_agente
+
+    r14 = processar_encerramento_e_pedido_humano(base, texto_usuario, intencao_rapida, rota_agente, ia_output)
+    base, intencao_rapida, rota_agente = r14.base, r14.intencao_rapida, r14.rota_agente
+
+    return ResultadoER(
+        base=base,
+        intencao_rapida=intencao_rapida,
+        rota_agente=rota_agente,
+        texto_usuario=texto_usuario,
+        ia_output=ia_output,
+        telefone=r1.telefone,
+        motivo_humano=base.get("motivo_humano"),
+        deve_resetar_agradecimento=r13.deve_resetar_agradecimento,
+        deve_encerrar_triagem=r14.deve_encerrar_triagem,
+    )
