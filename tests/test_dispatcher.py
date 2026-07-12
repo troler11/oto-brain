@@ -98,6 +98,13 @@ def test_carregar_prompt_todos_os_agentes_existem():
         assert carregar_prompt(agente)
 
 
+def test_carregar_prompt_resolve_tokens_regras_clinica():
+    for agente in ["coleta_1pac", "coleta_terceiro", "coleta_titular"]:
+        conteudo = carregar_prompt(agente)
+        assert "{{REGRAS:" not in conteudo
+        assert "A Oto-SP atende os seguintes convênios" in conteudo
+
+
 # ---------- despachar_turno ----------
 
 def test_despachar_turno_retorna_none_pra_rota_5():

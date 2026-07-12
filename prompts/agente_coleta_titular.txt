@@ -116,14 +116,7 @@ porto/ps → "Porto Seguro" | itaú → "Itaú" | bradesco → "Bradesco" | omin
     Senão → estado.i="agenda". Resposta: "Ótimo! Vou buscar horários na Vila Olímpia com Bradesco. 😊"
   "2"/"atendente"/"não"/"outro convênio"/"particular"/qualquer outro convênio → estado.i="humano". "Claro! Vou te passar para um atendente para te ajudar 😊" ⛔ NUNCA aceite particular nem outro convênio de quem tem Bradesco.
   ⛔ STOP.
-⛔ Omint → tem 3 CATEGORIAS com credenciamento distinto: Premium, Skill e Corporation. NUNCA aceite conv="Omint" puro — o sistema pergunta a categoria (conv="OMINT?"); quando houver tag [OMINT ...] no input, siga-a EXATAMENTE.
-  CONV_SALVO="OMINT?" → aguardando a categoria (menu 1-4). NÃO trate a resposta como convênio novo.
-  Omint Premium → atende nas DUAS unidades, SOMENTE com Dra. Giseli, Dr. Elias ou Dr. Jose Emmanuel. MED_SALVO for outro → "Pelo Omint Premium atendemos com a Dra. Giseli, o Dr. Elias ou o Dr. José Emmanuel. Com qual deles prefere? 😊" estado.med="".
-  Omint Skill / Omint Corporation → SOMENTE Dr. Torcuato Sanchez Rojas Neto, SOMENTE Vila Olímpia (quarta só à tarde, quinta e sexta). Paciente citar outro médico → "Infelizmente [médico] não atende pelo [categoria] — atende apenas pelo Omint Premium. Pelo [categoria] o atendimento é com o Dr. Torcuato. Quer seguir com ele? 😊"
-  Após escolher médico (Premium): Giseli → med="Dra. Giseli Rebechi", cf=0 (TA=quinta, VO=terça/quarta/sexta) | Elias → med="Dr. Elias Lobo Braga", cf=0, modo=3, dt=AMANHA, "Manhã ou tarde? 😊" | Jose → med="Dr. Jose Emmanuel Burle Neto", cf=0, dt=PROX_TER, ds="terca", modo=2, "Manhã ou tarde? 😊"
-  ⛔ Em `estado`, conv SEMPRE com a categoria completa (ex: "Omint Premium") — NUNCA "Omint" puro.
-  ⛔ STOP.
-⛔ Porto/Itaú → SEMPRE ACEITO. NUNCA diga "não atendemos". (DATA_SALVA vazio → dt=AMANHA. Preserve modo/ds/dt/med/per.)
+{{REGRAS:omint_categorias}}⛔ Porto/Itaú → SEMPRE ACEITO. NUNCA diga "não atendemos". (DATA_SALVA vazio → dt=AMANHA. Preserve modo/ds/dt/med/per.)
 Resposta: "Ótimo! Consulta como [conv] na [UNIDADE_SALVA], pela [PERIODO_SALVO]. Vou buscar os horários! 😊" → preencha estado.i="agenda", estado.cf=0
 
 CONV_SALVO='PART?' → sim → conv="Particular" (Exceção 2). recusa → conv="RESET_CONV".
@@ -146,30 +139,10 @@ Recusa → "Qual seu convênio? 😊" + conv="RESET_CONV".
 horario_preferencia: use HORARIO_SALVO se preenchido; senão extraia da mensagem; senão "". ⛔ Não pergunte horário.
 
 INFO_PARTICULAR:
-"Informações para agendamento Consulta no Particular:
-
-✔️ Incluso 1 retorno em até 30 dias
-
-✔️ Durante a consulta, se necessário, realizamos os seguintes procedimentos já inclusos no valor:
-
-- Vídeo-endoscopia naso-sinusal com ótica flexível
-- Vídeo-faringo-laringoscopia com endoscópio flexível
-- Nasofibrolaringoscopia para diagnóstico
-- Cerúmen-remoção (bilateral)
-
-📌 Formas de pagamento:
-
-- R$ 600,00 no débito ou crédito à vista
-- R$ 570,00 via PIX (5% de desconto)"
+{{REGRAS:info_particular}}
 
 LISTA_CONV:
-"A Oto-SP atende os seguintes convênios:
-➡️ Itaú
-➡️ Omint
-➡️ Porto Seguro
-➡️ Bradesco — apenas na Unidade Vila Olímpia
-
-Não encontrou o seu? Pode me informar o nome — verifico se atendemos, ou podemos agendar como particular! 😊"
+{{REGRAS:convenios_lista}}
 
 ━━━ campo estado.i — valores válidos ━━━
 triagem | coleta | agenda | concluido | humano | cancelando

@@ -32,6 +32,7 @@ from openai import OpenAI
 
 from app.agentes import RespostaAgente, chamar_agente
 from app.er import ResultadoER
+from app.regras_clinica import aplicar_regras
 
 PASTA_PROMPTS = Path(__file__).resolve().parent.parent / "prompts"
 
@@ -76,10 +77,12 @@ def escolher_agente(resultado: ResultadoER, n_pacientes: int = 0) -> str | None:
 
 @lru_cache(maxsize=None)
 def carregar_prompt(agente: str) -> str:
-    """Lê `prompts/agente_{agente}.txt`. Cacheado — os arquivos não mudam em runtime; um
-    restart do serviço é o mecanismo de deploy de prompt (igual ao resto do código)."""
+    """Lê `prompts/agente_{agente}.txt` e resolve os tokens `{{REGRAS:chave}}` (Fase 4,
+    mecanismo 3 — ver app.regras_clinica) pelo texto canônico. Cacheado — os arquivos não
+    mudam em runtime; um restart do serviço é o mecanismo de deploy de prompt (igual ao resto
+    do código)."""
     caminho = PASTA_PROMPTS / f"agente_{agente}.txt"
-    return caminho.read_text(encoding="utf-8")
+    return aplicar_regras(caminho.read_text(encoding="utf-8"))
 
 
 def despachar_turno(
