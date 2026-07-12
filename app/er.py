@@ -11,8 +11,12 @@ arquivo cobre, em fatias sucessivas:
   PARTE 2 (linhas 737-1090): coleta de identidade — extração multi-dados (nome/CPF/nascimento/
     email numa mensagem só), lookup de paciente por nome, identidade residual, execução sem
     nascimento, terceiro pede nascimento, CPF/nascimento trocados.
-O resto (convênios específicos, guards de agenda/coleta detalhados, empacotamento final) fica
-pra próximas fatias — cada uma seguindo o mesmo padrão de port fiel + testes.
+  PARTE 3 (linhas 1092-1613): convênio Omint (categorias), particular bloqueado/preço, menu
+    principal da triagem (opções 1-6), ver frase livre, fluxo de confirmar presença (escolher/
+    lista/recusou/turno2), atraso, oferta_agendar/oferta_humano, promoção pra rota=4 (agenda),
+    backstop de identidade incompleta, histórico do paciente, breadcrumb "outro dia".
+O resto (guards de agenda/coleta detalhados, empacotamento final) fica pra próximas fatias —
+cada uma seguindo o mesmo padrão de port fiel + testes.
 
 Como em app/eif1.py: PORT, não reescrita — ordem dos blocos e regras exatas espelham o JS de
 propósito, pra permitir comparação 1:1 na validação.
@@ -1223,3 +1227,592 @@ def processar_identidade(
             )
 
     return ResultadoIdentidade(base=base, intencao_rapida=intencao_rapida, rota_agente=rota_agente, motivo_humano=motivo_humano)
+
+
+# ============================================================================
+# PARTE 3 (linhas 1092-1613 do JS): convênio Omint, particular, menu principal,
+# confirmar presença, atraso, ofertas pendentes, promoção pra agenda, histórico
+# ============================================================================
+
+_MENU_OMINT_MSG = 'Qual é a categoria do seu plano Omint? 😊\nDigite o número:\n\n1️⃣ Premium\n2️⃣ Skill\n3️⃣ Corporation\n4️⃣ Não sei informar'
+
+_MED_OMINT_PREMIUM = ("giseli", "elias", "jose")
+
+_CONV_PENDENTES = ("PART?", "OMINT?", "RESET_CONV")
+
+
+@dataclass
+class ResultadoParte3:
+    base: dict
+    intencao_rapida: str
+    rota_agente: int
+    motivo_humano: str | None
+    sub_rota_agenda: str
+    esta_em_agenda_ativa: bool
+
+
+def processar_convenio_menu_agenda(
+    base: dict,
+    texto_usuario: str,
+    intencao_rapida: str,
+    rota_agente: int,
+    ia_output: dict,
+    eh_cancel_real: bool,
+    eh_sessao_nova: bool,
+    menu_opt: str,
+    ia_rota_original: int,
+    motivo_humano: str | None = None,
+) -> ResultadoParte3:
+    txt_norm = _norm(texto_usuario)
+
+    # FIX_OMINT_V2 (parte 1): categorias com credenciamento distinto
+    conv_om = (base.get("coleta_convenio") or "").strip().lower()
+    rota_coleta_om = rota_agente in (2, 3) or _int(base.get("sessao_rota")) in (2, 3)
+    if rota_coleta_om and conv_om == "omint?" and _texto_ia_livre(base):
+        eh_premium_om = menu_opt == "1" or "premium" in txt_norm
+        eh_skill_om = menu_opt == "2" or "skill" in txt_norm
+        eh_corp_om = menu_opt == "3" or "corporation" in txt_norm or "corporacao" in txt_norm or bool(re.search(r"\bcorp\b", txt_norm))
+        nao_sabe_om = menu_opt == "4" or bool(re.search(r"nao sei|nao lembro|nao tenho certeza|sei la", txt_norm))
+
+        if eh_premium_om:
+            base["coleta_convenio"] = "Omint Premium"
+            med_om = _norm(base.get("coleta_medico"))
+            med_real_om = bool(base.get("coleta_medico")) and base["coleta_medico"] not in ("sem preferencia", "__CLEAR__")
+            ok_premium = any(m in med_om for m in _MED_OMINT_PREMIUM)
+            if med_real_om and ok_premium:
+                base["texto_ia"] = (
+                    f'[OMINT PREMIUM OK: categoria Premium confirmada; {base["coleta_medico"]} atende Omint '
+                    'Premium. Setar conv="Omint Premium" no $$$. Confirme brevemente ("Perfeito, Omint Premium!") '
+                    'e CONTINUE o fluxo do ponto atual sem repetir etapas ja preenchidas: se unidade/dia/periodo '
+                    'ja estiverem salvos, siga para a busca de horarios; senao pergunte o proximo campo faltante. '
+                    '⛔ NUNCA invente horarios — horarios validos vem EXCLUSIVAMENTE de buscar_agenda.] ' + texto_usuario
+                )
+            else:
+                if med_real_om and not ok_premium:
+                    base["coleta_data"] = ""
+                    base["coleta_periodo"] = ""
+                    base["coleta_dia_semana"] = ""
+                    base["_clear_pm"] = {**(base.get("_clear_pm") or {}), "dt": 1, "per": 1, "ds": 1}
+                base["coleta_medico"] = ""
+                base["coleta_modo"] = 0
+                base["texto_ia"] = (
+                    '[OMINT PREMIUM: categoria confirmada. Pelo Omint Premium atendem SOMENTE Dra. Giseli Rebechi, '
+                    'Dr. Elias Lobo Braga e Dr. Jose Emmanuel Burle Neto (nas duas unidades). Setar conv="Omint '
+                    'Premium", med="", modo=0 no $$$. Responder EXATAMENTE: "Perfeito! Pelo Omint Premium atendemos '
+                    'com a Dra. Giseli, o Dr. Elias ou o Dr. José Emmanuel — nas duas unidades. Com qual deles '
+                    'prefere? 😊" NAO chame buscar_agenda.] ' + texto_usuario
+                )
+        elif eh_skill_om or eh_corp_om:
+            cat_om = "Omint Skill" if eh_skill_om else "Omint Corporation"
+            base["coleta_convenio"] = cat_om
+            if "Tatu" in (base.get("coleta_unidade") or ""):
+                base["coleta_medico"] = ""
+                base["coleta_modo"] = 0
+                base["coleta_data"] = ""
+                base["coleta_periodo"] = ""
+                base["coleta_dia_semana"] = ""
+                base["_clear_pm"] = {**(base.get("_clear_pm") or {}), "dt": 1, "per": 1, "ds": 1}
+                base["texto_ia"] = (
+                    f'[OMINT SO VILA OLIMPIA: o {cat_om} e atendido SOMENTE na Vila Olimpia, pelo Dr. Torcuato '
+                    f'Sanchez Rojas Neto — e a unidade atual e Tatuape. Setar conv="{cat_om}", med="", modo=0 no '
+                    '$$$ (⛔ NAO mude unid ainda). Responder EXATAMENTE: "O ' + cat_om + ' é atendido apenas na '
+                    'unidade Vila Olímpia, pelo Dr. Torcuato Sanchez Rojas Neto. Deseja mudar para a Vila Olímpia? '
+                    '😊" Aguarde a resposta.] ' + texto_usuario
+                )
+            else:
+                if not base.get("coleta_unidade"):
+                    base["coleta_unidade"] = "Vila Olímpia"
+                base["coleta_medico"] = "Dr. Torcuato Sanchez Rojas Neto"
+                base["coleta_modo"] = 3
+                base["coleta_data"] = ""
+                base["coleta_periodo"] = ""
+                base["coleta_dia_semana"] = ""
+                base["_clear_pm"] = {**(base.get("_clear_pm") or {}), "dt": 1, "per": 1, "ds": 1}
+                base["texto_ia"] = (
+                    f'[OMINT TORCUATO: o {cat_om} e atendido SOMENTE pelo Dr. Torcuato Sanchez Rojas Neto, na Vila '
+                    f'Olimpia. Setar conv="{cat_om}", unid="Vila Olímpia", med="Dr. Torcuato Sanchez Rojas Neto", '
+                    'modo=3, dt="", per="", ds="" no $$$. Responder EXATAMENTE: "O ' + cat_om + ' é atendido pelo '
+                    'Dr. Torcuato Sanchez Rojas Neto, na Vila Olímpia. Ele atende quarta (só tarde), quinta e '
+                    'sexta — qual dia prefere? 😊" NAO chame buscar_agenda.] ' + texto_usuario
+                )
+        elif nao_sabe_om:
+            rota_agente = 5
+            intencao_rapida = "humano"
+            ia_output["bypass_agente_humano"] = True
+            motivo_humano = "Paciente Omint nao sabe a categoria do plano (Premium/Skill/Corporation)"
+            base["motivo_humano"] = motivo_humano
+            base["texto_ia"] = (
+                '[TRANSFERIR HUMANO: paciente Omint nao sabe a categoria do plano. Responder EXATAMENTE: "Sem '
+                'problemas! Vou te transferir para uma atendente que confirma a categoria do seu plano e já '
+                'agenda para você. 😊" e emitir i="humano", motivo="Categoria do plano Omint". NAO siga o fluxo '
+                'de agenda/coleta.] ' + texto_usuario
+            )
+        else:
+            eh_duvida_om = bool(re.search(r"\bcomo\b|\bonde\b|vejo|encontro|descubro|\?", txt_norm))
+            dica_om = "Você encontra a categoria na sua carteirinha Omint (física ou no app). 😊\n\n" if eh_duvida_om else ""
+            base["texto_ia"] = (
+                f'[OMINT CATEGORIA INVALIDA: paciente respondeu "{texto_usuario}" mas esperamos a categoria do '
+                f'plano Omint. Responder EXATAMENTE: "{dica_om}{_MENU_OMINT_MSG}" NAO mude nada no $$$ (mantenha '
+                'conv="OMINT?").] ' + texto_usuario
+            )
+    elif (rota_coleta_om and conv_om in ("omint skill", "omint corporation")
+            and "Tatu" in (base.get("coleta_unidade") or "") and _texto_ia_livre(base)):
+        cat_omt = "Omint Skill" if conv_om == "omint skill" else "Omint Corporation"
+        sim_omt = bool(re.match(r"^(s|si|sim|pode|pode ser|quero|claro|ok|isso|bora|vamos|aceito|pode mudar|muda|trocar|troca|vila|vila olimpia)$", txt_norm)) \
+            or "vila ol" in txt_norm
+        nao_omt = bool(re.match(r"^(n|nao|nao quero|prefiro nao|deixa|melhor nao)$", txt_norm)) \
+            or bool(re.search(r"nao quero mudar|ficar no tatuape|prefiro( o)? tatuape", txt_norm))
+        if sim_omt:
+            base["coleta_unidade"] = "Vila Olímpia"
+            base["coleta_medico"] = "Dr. Torcuato Sanchez Rojas Neto"
+            base["coleta_modo"] = 3
+            base["coleta_data"] = ""
+            base["coleta_periodo"] = ""
+            base["coleta_dia_semana"] = ""
+            base["coleta_horario"] = ""
+            base["texto_ia"] = (
+                f'[TROCA UNIDADE OMINT: paciente aceitou mudar para a Vila Olimpia (unica unidade do {cat_omt}). '
+                'Setar unid="Vila Olímpia", med="Dr. Torcuato Sanchez Rojas Neto", modo=3, conv="' + cat_omt
+                + '", dt="", per="", ds="" no $$$. Responder EXATAMENTE: "Ótimo! Então será na Vila Olímpia com o '
+                'Dr. Torcuato Sanchez Rojas Neto. Ele atende quarta (só tarde), quinta e sexta — qual dia prefere? '
+                '😊" NAO chame buscar_agenda.] ' + texto_usuario
+            )
+        elif nao_omt:
+            ia_output["bypass_agente_humano"] = True
+            intencao_rapida = "humano"
+            motivo_humano = f"{cat_omt} so na Vila Olimpia e paciente nao quer mudar"
+            base["motivo_humano"] = motivo_humano
+            base["texto_ia"] = (
+                f'[OMINT SEM VILA OLIMPIA → ATENDENTE: paciente NAO quer ir para a Vila Olimpia e o {cat_omt} so '
+                'e atendido la. REGRA DA CLINICA: NAO ofereca particular nem outro convenio. Responder EXATAMENTE: '
+                f'"Entendo! Como o {cat_omt} é atendido apenas na Vila Olímpia, vou te passar para um atendente '
+                'para te ajudar, tudo bem? 😊" e emitir i="humano", motivo="' + cat_omt
+                + ' só na Vila Olímpia — paciente não quer mudar". NAO mude conv no $$$.] ' + texto_usuario
+            )
+        else:
+            base["texto_ia"] = (
+                f'[OMINT TROCA PENDENTE: o {cat_omt} so e atendido na Vila Olimpia e o paciente respondeu '
+                f'"{texto_usuario}". Responder EXATAMENTE: "O {cat_omt} é atendido apenas na Vila Olímpia, pelo '
+                'Dr. Torcuato. Deseja mudar para a Vila Olímpia? 😊" NAO mude nada no $$$.] ' + texto_usuario
+            )
+
+    # FIX_PARTICULAR_BLOQUEADO (REGRA CLINICA 03/07)
+    conv_pb = (base.get("coleta_convenio") or "").lower()
+    restrito_pb = bool(re.search(r"bradesco|omint|amil|med ?serv", conv_pb))
+    if (restrito_pb and re.search(r"\bparticular\b", txt_norm)
+            and not ia_output.get("bypass_agente_humano") and _texto_ia_livre(base)):
+        ia_output["bypass_agente_humano"] = True
+        intencao_rapida = "humano"
+        motivo_humano = f'Convenio {base.get("coleta_convenio")} pediu particular (regra clinica)'
+        base["motivo_humano"] = motivo_humano
+        base["texto_ia"] = (
+            f'[PARTICULAR BLOQUEADO → ATENDENTE: paciente com {base.get("coleta_convenio")} pediu particular. '
+            'REGRA DA CLINICA: convenio declarado NUNCA vira particular pelo bot. Responder EXATAMENTE: '
+            '"Infelizmente não podemos seguir no particular — vou te transferir para um atendente 😊" e emitir '
+            f'i="humano", motivo="Plano {base.get("coleta_convenio")} não permite particular". ⛔ NAO mostre '
+            'preço. ⛔ NAO ofereça outro convenio.] ' + texto_usuario
+        )
+
+    # FIX_PARTICULAR_PRECO
+    rota_coleta_pp = rota_agente in (2, 3) or _int(base.get("sessao_rota")) in (2, 3)
+    if (rota_coleta_pp and re.search(r"\bparticular\b", txt_norm) and not (base.get("coleta_convenio") or "").strip()
+            and not ia_output.get("bypass_agente_humano") and _texto_ia_livre(base)):
+        base["texto_ia"] = (
+            '[PARTICULAR PRECO: paciente escolheu Particular. Setar conv="PART?" no $$$. Responder EXATAMENTE: '
+            '"Informações para agendamento Consulta no Particular:\n✔️ Incluso 1 retorno em até 30 dias\n'
+            '✔️ Procedimentos inclusos: vídeo-endoscopia, faringo-laringoscopia, nasofibrolaringoscopia, remoção '
+            'de cerúmen\n📌 Pagamento: R$ 600,00 no débito/crédito | R$ 570,00 via PIX (5% de desconto)\n\n'
+            'Deseja agendar como Particular? 😊" ⛔ NUNCA pule o preço. ⛔ NAO chame buscar_agenda ainda.] ' + texto_usuario
+        )
+
+    # MENU PRINCIPAL: números em sessão nova
+    if eh_sessao_nova:
+        opt = menu_opt
+        ctx_menu_puro = not base.get("sessao_intencao") or base.get("sessao_intencao") in ("triagem", "concluido")
+        eh_confirmar_kw = (
+            not eh_cancel_real and bool(re.search(r"\bconfirm(a|ar|o|ado)\b", txt_norm))
+            and (bool(re.search(r"(consulta|presenc|agendamento|horario)", txt_norm)) or ctx_menu_puro)
+        )
+        if opt == "1":
+            rota_agente = 2
+            intencao_rapida = "coleta"
+            pacs_895 = base.get("pacientes") or []
+            if len(pacs_895) == 1:
+                pergunta_p1 = f'A consulta será para {pacs_895[0].get("nome", "")} ou para outra pessoa? 😊'
+            elif len(pacs_895) >= 2:
+                nomes = ", ".join(p.get("nome", "") for p in pacs_895)
+                pergunta_p1 = f'A consulta será para {nomes} ou para outra pessoa? 😊'
+            else:
+                pergunta_p1 = 'A consulta será para você ou para outra pessoa? 😊'
+            base["texto_ia"] = (
+                f'[INICIO COLETA: paciente escolheu "1 Agendar". ⛔ NÃO mostre o menu principal de novo. '
+                f'⛔ NÃO peça nome/CPF agora. Responder EXATAMENTE: "{pergunta_p1}"]'
+            )
+        elif opt in ("2", "3"):
+            rota_agente = 1
+            intencao_rapida = "cancelando"
+        elif opt == "4":
+            intencao_rapida = "ver"
+            pacs_ver = base.get("pacientes") or []
+            if len(pacs_ver) >= 2:
+                intencao_rapida = "ver_escolher"
+                menu_tit = "\n".join(f'{i + 1}. {p.get("nome") or f"Titular {i + 1}"}' for i, p in enumerate(pacs_ver))
+                base["texto_ia"] = (
+                    f'[VER ESCOLHER TITULAR: ha {len(pacs_ver)} titulares neste numero. ⛔ NAO peca CPF nem nome. '
+                    f'Responder EXATAMENTE: "De quem você quer ver as consultas pendentes?\n\n{menu_tit}"] ' + texto_usuario
+                )
+            else:
+                p_ver = pacs_ver[0] if pacs_ver else {}
+                nome_ver = p_ver.get("nome") or base.get("nome") or ""
+                id_ver = p_ver.get("id_tisaude") or base.get("id_tisaude") or ""
+                base["texto_ia"] = (
+                    f'[VER CONSULTAS: paciente escolheu "4 Consulta pendente". ⛔ NAO peca CPF nem nome — paciente '
+                    f'JA identificado ({nome_ver}, id {id_ver}). Chame consultar_minhas_consultas AGORA e liste as '
+                    'consultas pendentes. i="ver".] ' + texto_usuario
+                )
+        elif opt == "5":
+            ia_output["bypass_agente_humano"] = True
+        elif opt == "6" or eh_confirmar_kw:
+            rota_agente = 5
+            intencao_rapida = "confirmar_presenca"
+            base["_sub_confirmar"] = "verificar"
+            pacs_cp = base.get("pacientes") or []
+            if len(pacs_cp) >= 2:
+                intencao_rapida = "confirmar_presenca_escolher"
+                base["_sub_confirmar"] = "escolher_titular"
+                menu_tit_cp = "\n".join(f'{i + 1}. {p.get("nome") or f"Titular {i + 1}"}' for i, p in enumerate(pacs_cp))
+                base["texto_ia"] = (
+                    f'[CONFIRMAR PRESENÇA - ESCOLHER TITULAR: há {len(pacs_cp)} titulares neste número. ⛔ NAO peca '
+                    f'CPF nem nome. Responder EXATAMENTE: "De quem você quer confirmar a consulta?\n\n{menu_tit_cp}"] '
+                    + texto_usuario
+                )
+            else:
+                toks_cf = re.sub(r"[^a-z0-9 ]", " ", txt_norm).strip().split()
+                confirma_forte = (
+                    opt == "6"
+                    or bool(re.match(r"^\W*(confirma|confirmar|confirmo|confirmado)\W*$", txt_norm))
+                    or bool(re.search(r"confirmar?\s+(minha\s+)?presen", txt_norm))
+                    or (len(toks_cf) <= 5
+                        and any(re.match(r"^(confirma|confirmar|confirmo|confirmado)$", t) for t in toks_cf)
+                        and not re.search(r"\?|\bnao\b|\bcomo\b|\bposso\b|\bsera\b", txt_norm))
+                )
+                if confirma_forte:
+                    base["_confirma_direto"] = True
+                p_cp = pacs_cp[0] if pacs_cp else {}
+                nome_cp = p_cp.get("nome") or base.get("nome") or ""
+                id_cp = p_cp.get("id_tisaude") or base.get("id_tisaude") or ""
+                base["texto_ia"] = (
+                    f'[CONFIRMAR PRESENÇA INICIO: paciente escolheu opção 6. ⛔ NAO mostre o menu. ⛔ NAO peca CPF '
+                    f'nem nome — paciente JA identificado ({nome_cp}, id {id_cp}). Chame consultar_minhas_consultas '
+                    'e liste as consultas pendentes. Pergunte: "Deseja confirmar presença na consulta do dia [DATA] '
+                    'às [HORA] com Dr(a). [MÉDICO]? 😊" Emitir i="confirmar_presenca" no $$$. NAO confirme ainda — '
+                    'só pergunte.] ' + texto_usuario
+                )
+
+    # FIX_VER_FRASE_LIVRE
+    if eh_sessao_nova and intencao_rapida not in ("ver", "ver_escolher"):
+        eh_frase_ver = bool(re.search(
+            r"esqueci.*(data|dia|quando|hora|consulta)|quando.*(minha\s*)?(e|esta|sera|tem).*consulta|"
+            r"qual.*(data|dia|hora).*consulta|ver.*minhas?\s*consultas?|minhas\s*consultas?|"
+            r"tem.*consulta.*marcad[ao]", txt_norm
+        ))
+        pacs_fl = base.get("pacientes") or []
+        tem_pac_fl = bool(pacs_fl) or bool(base.get("cpf") or base.get("id_tisaude"))
+        if eh_frase_ver and tem_pac_fl:
+            intencao_rapida = "ver"
+            if len(pacs_fl) >= 2:
+                intencao_rapida = "ver_escolher"
+                menu_tit_fl = "\n".join(f'{i + 1}. {p.get("nome") or f"Titular {i + 1}"}' for i, p in enumerate(pacs_fl))
+                base["texto_ia"] = (
+                    f'[VER ESCOLHER TITULAR: ha {len(pacs_fl)} titulares neste numero. ⛔ NAO peca CPF nem nome. '
+                    f'Responder EXATAMENTE: "De quem você quer ver as consultas pendentes?\n\n{menu_tit_fl}"] ' + texto_usuario
+                )
+            else:
+                p_fl = pacs_fl[0] if pacs_fl else {}
+                nome_fl = p_fl.get("nome") or base.get("nome") or ""
+                id_fl = p_fl.get("id_tisaude") or base.get("id_tisaude") or ""
+                base["texto_ia"] = (
+                    f'[VER CONSULTAS: paciente perguntou "{texto_usuario}". ⛔ NAO peca CPF nem nome — paciente JA '
+                    f'identificado ({nome_fl}, id {id_fl}). Chame consultar_minhas_consultas AGORA e liste as '
+                    'consultas pendentes. i="ver".] ' + texto_usuario
+                )
+
+    # FIX_CONFIRMAR_PRESENCA_ESCOLHER
+    if base.get("sessao_intencao") == "confirmar_presenca_escolher":
+        pacs_cp2 = base.get("pacientes") or []
+        sel_cp2 = _to_int_or_none(texto_usuario.strip())
+        if sel_cp2 is not None and 1 <= sel_cp2 <= len(pacs_cp2):
+            p_sel2 = pacs_cp2[sel_cp2 - 1]
+            nome_s2 = p_sel2.get("nome") or f"Titular {sel_cp2}"
+            id_s2 = p_sel2.get("id_tisaude") or ""
+            rota_agente = 5
+            intencao_rapida = "confirmar_presenca"
+            base["_sub_confirmar"] = "verificar"
+            base["_confirma_direto"] = True
+            base["cpf_dependente"] = p_sel2.get("cpf") or base.get("cpf_dependente") or ""
+            base["nome_dependente"] = nome_s2
+            base["id_tisaude"] = id_s2
+            base["texto_ia"] = (
+                f'[CONFIRMAR PRESENÇA INICIO: paciente escolheu {nome_s2} (id {id_s2}). ⛔ NAO mostre menu. '
+                '⛔ NAO peca CPF nem nome — paciente JA identificado. Chame consultar_minhas_consultas e liste as '
+                'consultas pendentes. Pergunte: "Deseja confirmar presença na consulta do dia [DATA] às [HORA] com '
+                'Dr(a). [MÉDICO]? 😊" Emitir i="confirmar_presenca". NAO confirme ainda.] ' + texto_usuario
+            )
+        else:
+            nao_esc = bool(re.search(r"\b(nao|n|nao quero|cancelar|cancela|desmarcar|desistir|deixa)\b", txt_norm))
+            if nao_esc:
+                rota_agente = 5
+                intencao_rapida = "confirmar_presenca_recusou"
+                base["_sub_confirmar"] = "recusou"
+            elif _int(base.get("coleta_conv_fail")) >= 2:
+                ia_output["bypass_agente_humano"] = True
+                intencao_rapida = "humano"
+                motivo_humano = "Confirmação de presença — paciente não conseguiu escolher o titular"
+                base["motivo_humano"] = motivo_humano
+                base["texto_ia"] = (
+                    '[TRANSFERIR HUMANO: paciente não conseguiu responder a lista de confirmação. Responder '
+                    'EXATAMENTE: "Vou te passar para um atendente para te ajudar com a confirmação! 😊" e emitir '
+                    'i="humano", motivo="Confirmação de presença — paciente não conseguiu escolher".] ' + texto_usuario
+                )
+            else:
+                rota_agente = 5
+                intencao_rapida = "confirmar_presenca_escolher"
+                base["_sub_confirmar"] = "escolher_titular"
+
+    # FIX_CONFIRMAR_PRESENCA_LISTA
+    if base.get("sessao_intencao") == "confirmar_presenca_lista":
+        sel_lst = _to_int_or_none(txt_norm)
+        nao_lst = bool(re.search(r"\b(nao|n|nao quero|cancelar|cancela|desmarcar|desistir|deixa)\b", txt_norm))
+        if sel_lst is not None and sel_lst >= 1:
+            rota_agente = 5
+            intencao_rapida = "confirmar_presenca"
+            base["_sub_confirmar"] = "verificar"
+            base["_indice_consulta"] = sel_lst
+            base["_confirma_direto"] = True
+        elif nao_lst:
+            rota_agente = 5
+            intencao_rapida = "confirmar_presenca_recusou"
+            base["_sub_confirmar"] = "recusou"
+        elif _int(base.get("coleta_conv_fail")) >= 2:
+            ia_output["bypass_agente_humano"] = True
+            intencao_rapida = "humano"
+            motivo_humano = "Confirmação de presença — paciente não conseguiu escolher a consulta"
+            base["motivo_humano"] = motivo_humano
+            base["texto_ia"] = (
+                '[TRANSFERIR HUMANO: paciente não conseguiu responder a lista de confirmação. Responder EXATAMENTE: '
+                '"Vou te passar para um atendente para te ajudar com a confirmação! 😊" e emitir i="humano", '
+                'motivo="Confirmação de presença — paciente não conseguiu escolher".] ' + texto_usuario
+            )
+        else:
+            rota_agente = 5
+            intencao_rapida = "confirmar_presenca_lista"
+            base["_sub_confirmar"] = "verificar"
+
+    # FIX_CONFIRMAR_PRESENCA_RECUSOU
+    if base.get("sessao_intencao") == "confirmar_presenca_recusou":
+        sim_rc = bool(re.search(r"\b(sim|s|quero|pode|isso|cancelar|cancela|desmarcar|remarcar|remarca|trocar|mudar|outro)\b", txt_norm))
+        nao_rc = bool(re.search(r"\b(nao|n|nao quero|deixa|esquece|nada|obrigad|obg|valeu|tudo bem|ta bom|ok)\b", txt_norm))
+        if sim_rc and not nao_rc:
+            rota_agente = 1
+            intencao_rapida = "cancelando"
+            base["texto_ia"] = (
+                '[CANCELAMENTO via recusa de confirmação: paciente quer cancelar ou remarcar a consulta. Proceder '
+                'normalmente com o cancelamento.] ' + texto_usuario
+            )
+        else:
+            rota_agente = 5
+            intencao_rapida = "concluido"
+            base["_sub_confirmar"] = "despedida"
+
+    # FIX_CONFIRMAR_PRESENCA (turno 2)
+    if base.get("sessao_intencao") == "confirmar_presenca":
+        sim_cp = bool(re.search(r"\b(sim|s|ok|pode|isso|confirmo|confirma|confirmado|claro|bora|vamos|perfeito)\b", txt_norm))
+        nao_cp = bool(re.search(r"\b(nao|n|nao quero|cancelar|cancela|desmarcar)\b", txt_norm))
+        if sim_cp and not nao_cp:
+            rota_agente = 5
+            intencao_rapida = "confirmar_presenca"
+            id_ag_cp = str(base.get("coleta_id_agendamento") or "").strip()
+            if id_ag_cp:
+                base["_sub_confirmar"] = "executar"
+            else:
+                base["_sub_confirmar"] = "verificar"
+                base["_confirma_direto"] = True
+        elif nao_cp:
+            rota_agente = 5
+            intencao_rapida = "confirmar_presenca_recusou"
+            base["_sub_confirmar"] = "recusou"
+        else:
+            rota_agente = 5
+            intencao_rapida = "confirmar_presenca"
+            base["_sub_confirmar"] = "verificar"
+
+    # FIX_ATRASO_HUMANO — sem gate: sempre que casar, sobrescreve (prioridade máxima)
+    eh_atraso = bool(re.search(
+        r"atrasar|atrasad|atrasando|vou chegar (mais )?tarde|chegar mais tarde|vou demorar|preso no transito|"
+        r"preso no transit|engarrafament", txt_norm
+    ))
+    if eh_atraso:
+        ia_output["bypass_agente_humano"] = True
+        motivo_humano = "Paciente avisou que vai se atrasar para a consulta"
+        base["motivo_humano"] = motivo_humano
+        base["texto_ia"] = (
+            '[TRANSFERIR HUMANO: paciente avisou que vai se atrasar para a consulta. Responder EXATAMENTE: "Vou te '
+            'transferir para um atendente para ajustar isso! 😊" e emitir i="humano", motivo="Paciente vai se '
+            'atrasar para a consulta". NAO siga o fluxo de agenda/coleta.] ' + texto_usuario
+        )
+
+    # FIX_67529: resposta à oferta_agendar pendente
+    if base.get("sessao_intencao") == "oferta_agendar" and not eh_cancel_real and _texto_ia_livre(base):
+        txt_oa_seco = re.sub(r"[^a-z]", "", txt_norm)
+        sim_oa = bool(re.search(r"\b(sim|sin|claro|quero|pode|pode ser|isso|ok|beleza|blz|bora|vamos|por favor|agendar|marcar)\b", txt_norm)) \
+            or txt_oa_seco in ("s", "ss", "si", "sim", "sin")
+        nao_oa = bool(re.search(r"\b(nao|deixa|depois|esquece|nem|so isso|obrigad[oa]|por enquanto)\b", txt_norm)) or txt_oa_seco == "n"
+        if sim_oa and not nao_oa:
+            rota_agente = 2
+            intencao_rapida = "coleta"
+            pacs_oa = base.get("pacientes") or []
+            if len(pacs_oa) == 1:
+                pergunta_oa = f'A consulta será para {pacs_oa[0].get("nome", "")} ou para outra pessoa? 😊'
+            elif len(pacs_oa) >= 2:
+                pergunta_oa = f'A consulta será para {", ".join(p.get("nome", "") for p in pacs_oa)} ou para outra pessoa? 😊'
+            else:
+                pergunta_oa = 'A consulta será para você ou para outra pessoa? 😊'
+            base["texto_ia"] = (
+                f'[INICIO COLETA: paciente aceitou o convite de agendamento. ⛔ NÃO mostre o menu principal. '
+                f'⛔ NÃO peça CPF agora. Responder EXATAMENTE: "{pergunta_oa}"]'
+            )
+        elif nao_oa:
+            intencao_rapida = "concluido"
+            base["texto_ia"] = (
+                '[ENCERRAMENTO OFERTA AGENDAR: paciente nao quer agendar agora. Responder EXATAMENTE: "Sem '
+                'problemas! 😊 Precisando de algo é só chamar!" e emitir i="concluido".] ' + texto_usuario
+            )
+        else:
+            intencao_rapida = "triagem"
+
+    # FIX_CONFIRMA_HUMANO: resposta à oferta_humano pendente
+    if base.get("sessao_intencao") == "oferta_humano":
+        txt_ch_seco = re.sub(r"[^a-z]", "", txt_norm)
+        sim_humano = (
+            bool(re.search(r"\b(sim|sin|claro|quero|pode|isso|aceito|ok|positivo|atendente|bora|vamos|preciso)\b", txt_norm))
+            or bool(re.search(r"confirm", txt_norm)) or bool(re.search(r"por favor|pf\b", txt_norm))
+            or txt_ch_seco in ("s", "ss", "si")
+        )
+        nao_humano = bool(re.search(r"\b(nao|deixa|depois|esquece|nem|cancela|so isso|sem)\b", txt_norm)) or txt_ch_seco == "n"
+        if sim_humano and not nao_humano:
+            ia_output["bypass_agente_humano"] = True
+            intencao_rapida = "humano"
+            motivo_humano = "Duvida nao respondida pelo bot — paciente pediu atendente"
+            base["motivo_humano"] = motivo_humano
+            base["texto_ia"] = (
+                '[TRANSFERIR HUMANO: paciente confirmou que quer falar com atendente apos uma duvida nao '
+                'respondida. Responder EXATAMENTE: "Certo! Vou te transferir para um atendente. 😊" e emitir '
+                'i="humano", motivo="Duvida". NAO siga o fluxo de agenda/coleta.] ' + texto_usuario
+            )
+        elif nao_humano:
+            intencao_rapida = "triagem"
+
+    # ROTA 4: todos os passos de coleta confirmados → Agente Agenda
+    conv_valido = (base.get("coleta_convenio") or "") != "" and base.get("coleta_convenio") not in _CONV_PENDENTES
+    all_coleta_confirmed = (
+        conv_valido
+        and (base.get("coleta_data") or "") != ""
+        and (base.get("coleta_unidade") or "") != ""
+        and (base.get("coleta_periodo") or "") != ""
+    )
+    ia_requested_downgrade = (
+        isinstance(ia_output.get("rota_agente"), int) and ia_rota_original < 4 and _int(base.get("sessao_rota")) >= 4
+    )
+    if all_coleta_confirmed and rota_agente in (2, 3) and not ia_requested_downgrade:
+        rota_agente = 4
+
+    # PROTEÇÃO COLETA AGENDA: rota=4 sem coleta completa → downgrade
+    if rota_agente == 4 and not all_coleta_confirmed:
+        rota_agente = 2
+
+    # FIX_IDENTIDADE_0PAC (52775): backstop de identidade antes do Agente Agenda
+    identidade_incompleta = not base.get("paciente_encontrado") and (
+        not (base.get("nome_dependente") or "").strip()
+        or not (base.get("cpf_dependente") or "").strip()
+        or not (base.get("nascimento_dependente") or "").strip()
+    )
+    if identidade_incompleta and rota_agente == 4:
+        rota_agente = 3 if base.get("coleta_terceiro") == "true" else 2
+        if intencao_rapida == "agenda":
+            intencao_rapida = "coleta"
+        if not (base.get("nome_dependente") or "").strip():
+            falta_id = "nome completo"
+        elif not (base.get("cpf_dependente") or "").strip():
+            falta_id = "CPF"
+        else:
+            falta_id = "data de nascimento"
+        base["texto_ia"] = (
+            f'[IDENTIDADE OBRIGATORIA: paciente NAO cadastrado, falta o {falta_id}. ⛔ NAO chame buscar_agenda. '
+            f'⛔ NAO confirme horario. Pergunte EXATAMENTE pelo {falta_id} do paciente antes de prosseguir. Mantenha '
+            'unid/med/dt/per/conv no $$$.] ' + texto_usuario
+        )
+
+    # FIX_HIST_PACIENTE (57455) + FIX_ULTIMO_CONV (57405): stashed em base pra uso downstream
+    pacs_hist = base.get("pacientes") or []
+    id_hist = str(base.get("coleta_id_tisaude") or "")
+    nm_hist = (base.get("nome_dependente") or "").strip().lower()
+    hist_pac = None
+    if id_hist:
+        hist_pac = next((x for x in pacs_hist if str(x.get("id_tisaude")) == id_hist), None)
+    if not hist_pac and nm_hist:
+        hist_pac = next((x for x in pacs_hist if (x.get("nome") or "").strip().lower() == nm_hist), None)
+    if not hist_pac and len(pacs_hist) == 1:
+        hist_pac = pacs_hist[0]
+    hist_pac = hist_pac or {}
+    base["_ultimo_medico_global"] = hist_pac.get("ultimo_medico") or ""
+
+    ult_conv_upper = (hist_pac.get("ultimo_convenio") or "").upper()
+    ult_conv_global = ""
+    if ult_conv_upper:
+        if "PARTICULAR" in ult_conv_upper:
+            ult_conv_global = "Particular"
+        elif "PORTO" in ult_conv_upper:
+            ult_conv_global = "Porto Seguro"
+        elif "ITAU" in ult_conv_upper or "ITAÚ" in ult_conv_upper:
+            ult_conv_global = "Itaú"
+        elif "BRADESCO" in ult_conv_upper:
+            ult_conv_global = "Bradesco"
+        elif "OMINT" in ult_conv_upper:
+            ult_conv_global = "Omint"
+    base["_ultimo_convenio_global"] = ult_conv_global
+    base["_pergunta_convenio_global"] = (
+        f'Sua última consulta foi como {ult_conv_global}. Deseja usar {ult_conv_global} novamente, ou prefere '
+        'outra forma? 😊'
+    ) if ult_conv_global else 'A consulta será Particular ou Convênio? 😊'
+
+    # FIX_OUTRO_DIA_BREADCRUMB
+    if base.get("sessao_intencao") == "oferecer_outro_dia":
+        base["sessao_intencao"] = "navegacao"
+        neg_od = bool(re.match(r"^(nao|n|nao quero|esse mesmo|esse|fico com esse|pode ser esse|deixa esse)\b", txt_norm))
+        afirm_od = not neg_od and (
+            bool(re.match(r"^(s|si|sim|quero|pode|isso|outro|proximo|proxima|ver outro|quero ver|pode ser|sim quero|quero outro|outro dia)\b", txt_norm))
+            or "outro dia" in txt_norm or "proximo dia" in txt_norm
+        )
+        if afirm_od:
+            base["texto_ia"] = (
+                '[VER OUTRO DIA CONFIRMADO: paciente quer ver o proximo dia disponivel. ⛔ OBRIGATORIO chamar '
+                'navegar_agenda(avancar) AGORA e EXIBIR o proximo dia. ⛔ NAO repita os horarios do dia atual. '
+                '⛔ NAO peca horario do dia atual. i="agenda".] ' + texto_usuario
+            )
+
+    # FIX_AGENDA_SUB_ROUTE: divide rota=4 em sub-estados
+    agenda_sub_rotas = ("navegacao", "confirmacao", "execucao", "coleta")
+    esta_em_sub_rota_agenda = base.get("sessao_intencao") in agenda_sub_rotas
+    esta_em_agenda_ativa = esta_em_sub_rota_agenda or (
+        base.get("sessao_intencao") == "agenda" and _int(base.get("sessao_rota")) == 4
+    )
+    sub_rota_agenda = base.get("sessao_intencao") if esta_em_sub_rota_agenda else "navegacao"
+
+    return ResultadoParte3(
+        base=base,
+        intencao_rapida=intencao_rapida,
+        rota_agente=rota_agente,
+        motivo_humano=motivo_humano,
+        sub_rota_agenda=sub_rota_agenda,
+        esta_em_agenda_ativa=esta_em_agenda_ativa,
+    )
