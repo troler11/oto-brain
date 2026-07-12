@@ -67,6 +67,16 @@ arquivo cobre, em fatias sucessivas:
     próximo"), FIX_MESMO_MEDICO ("quero o mesmo médico de sempre"), FIX_MENU_P3_INVALIDO,
     FIX_CONVENIO_GENERICO. Mais 2 tabelas de grade reaproveitadas (`_DLU_PERIODO`/`_GRADE_TEXTO`/
     `_GRADE_DP`, já existentes desde as Partes 5-6) confirmadas byte-a-byte idênticas de novo.
+  PARTE 11 (linhas 3984-4194): FIX_CONVENIO_ACEITO (Bradesco/Porto/Itaú aceitos
+    deterministicamente assim que unidade+médico existem; Bradesco bloqueado em Tatuapé),
+    FIX_OMINT_V2 parte 2 — pergunta de categoria (Premium/Skill/Corporation), backstop de médico
+    incompatível com a categoria já definida, e FIX_OMINT_MENCAO_MEDICO (paciente pergunta por
+    médico fora do credenciamento da categoria), FIX_67650b (desarme estreito de
+    `bypass_agente_humano` quando a "recusa" que o levou pra fila era, na verdade, resposta
+    válida à pergunta de convênio), FIX_ULTIMO_CONV (handler do sim/não quando a pergunta
+    personalizada "quer repetir o mesmo convênio?" está pendente) e FIX_PROTECAO_COLETA_CONVENIO
+    (re-pergunta convênio sem resetar campos quando o texto não é convênio nem mudança de
+    assunto, distinguindo confirmação genérica / pergunta sobre opções / resposta inválida).
 O resto (guards de criação de consulta, cancelamento, empacotamento final) fica pra próximas
 fatias — cada uma seguindo o mesmo padrão de port fiel + testes.
 
@@ -4917,3 +4927,357 @@ def processar_convenio_e_dia_deterministico(
             )
 
     return ResultadoParte10(base=base, intencao_rapida=intencao_rapida, rota_agente=rota_agente)
+
+
+# ---------------------------------------------------------------------------------------------
+# PARTE 11 (linhas 3984-4194)
+# ---------------------------------------------------------------------------------------------
+
+@dataclass
+class ResultadoParte11:
+    base: dict
+    intencao_rapida: str
+    rota_agente: int
+
+
+def processar_convenio_omint_e_ultimo(
+    base: dict,
+    texto_usuario: str,
+    intencao_rapida: str,
+    rota_agente: int,
+    ia_output: dict,
+) -> ResultadoParte11:
+    """Linhas 3984-4194 do JS fonte: FIX_CONVENIO_ACEITO (Bradesco/Porto/Itaú determinísticos),
+    FIX_OMINT_V2 parte 2 (categoria + backstop de médico incompatível + menção a médico fora do
+    credenciamento), FIX_67650b (desarme estreito de bypass_agente_humano), FIX_ULTIMO_CONV
+    (sim/não pra repetir o último convênio) e FIX_PROTECAO_COLETA_CONVENIO."""
+
+    # FIX_CONVENIO_ACEITO: convenio valido na unidade selecionada -> aceitar e prosseguir
+    if (
+        rota_agente in (2, 3) and base.get("coleta_unidade") and base.get("coleta_medico")
+        and (not base.get("coleta_convenio") or base.get("coleta_convenio") == "RESET_CONV")
+        and not base.get("_periodo_precomputed")
+    ):
+        txt_ca = _norm(texto_usuario)
+        conv_aceito = ""
+        if "bradesco" in txt_ca or txt_ca == "brad":
+            conv_aceito = "Bradesco"
+        elif "porto" in txt_ca:
+            conv_aceito = "Porto Seguro"
+        elif "itau" in txt_ca:
+            conv_aceito = "Itaú"
+
+        if conv_aceito:
+            eh_restrito_vo = conv_aceito == "Bradesco"
+            eh_tatuape = "Tatu" in (base.get("coleta_unidade") or "")
+            if not (eh_restrito_vo and eh_tatuape):
+                base["coleta_convenio"] = conv_aceito
+                med_omint_ok_ca = conv_aceito != "Omint" or any(
+                    m in _norm(base.get("coleta_medico") or "") for m in ("giseli", "elias", "jose")
+                )
+                identidade_incompleta_ca = not base.get("paciente_encontrado")
+                if (
+                    base.get("coleta_data") and base.get("coleta_periodo") and med_omint_ok_ca
+                    and not identidade_incompleta_ca
+                ):
+                    med_busca_ca = (
+                        "sem preferencia" if (_int(base.get("coleta_modo")) == 1 or not base.get("coleta_medico"))
+                        else base["coleta_medico"]
+                    )
+                    rota_agente = 4
+                    base["_sub_rota_agenda"] = "navegacao"
+                    intencao_rapida = "agenda"
+                    base["texto_ia"] = (
+                        f'[CONV ACEITO + BUSCAR AGENDA: {conv_aceito} aceito e coleta completa. Setar '
+                        f'conv="{conv_aceito}", i="agenda" no $$$. Chame buscar_agenda AGORA com '
+                        f'unid="{base["coleta_unidade"]}", med="{med_busca_ca}", dt="{base["coleta_data"]}", '
+                        f'per="{base["coleta_periodo"]}". Comece a resposta com "Ótimo! Consulta como '
+                        f'{conv_aceito} na {base["coleta_unidade"]}." e mostre os horarios que a TOOL retornar. '
+                        '⛔ NUNCA invente horarios. ⛔ NAO pergunte "Posso verificar?".] ' + texto_usuario
+                    )
+                else:
+                    resumo_ca = f'{conv_aceito} na {base["coleta_unidade"]}'
+                    if base.get("coleta_medico") and base["coleta_medico"] != "sem preferencia":
+                        resumo_ca += f' com {base["coleta_medico"]}'
+                    if base.get("coleta_periodo"):
+                        resumo_ca += f', pela {base["coleta_periodo"]}'
+                    base["texto_ia"] = (
+                        f'[CONVENIO ACEITO: {conv_aceito} valido em {base["coleta_unidade"]}. Setar '
+                        f'conv="{conv_aceito}", i="navegacao" no $$$. Responder EXATAMENTE: "Ótimo! Consulta '
+                        f'como {resumo_ca}. Posso verificar os horarios disponiveis? 😊" NAO chame buscar_agenda '
+                        'agora. Aguarde confirmacao.] ' + (base.get("texto_ia") or "")
+                    )
+
+    # FIX_OMINT_V2 parte 2: perguntar categoria + backstop + mencao a medico fora do credenciamento
+    conv_oma = (base.get("coleta_convenio") or "").strip().lower()
+    txt_oma = _norm(texto_usuario)
+    menu_omint2 = (
+        "Qual é a categoria do seu plano Omint? 😊\nDigite o número:\n\n1️⃣ Premium\n2️⃣ Skill\n"
+        "3️⃣ Corporation\n4️⃣ Não sei informar"
+    )
+    eh_pergunta_oma = "?" in txt_oma or bool(re.search(r"\b(qual|quais|aceita|aceitam|cobre|atende|atendem)\b", txt_oma))
+
+    if (
+        rota_agente in (2, 3) and _texto_ia_livre(base)
+        and (
+            conv_oma == "omint"
+            or ((not conv_oma or conv_oma in ("part?", "reset_conv")) and "omint" in txt_oma and not eh_pergunta_oma)
+        )
+    ):
+        base["coleta_convenio"] = "OMINT?"
+        base["texto_ia"] = (
+            '[OMINT CATEGORIA: paciente tem Omint. As categorias tem credenciamento distinto — PERGUNTE a '
+            f'categoria antes de aceitar. Setar conv="OMINT?" no $$$. Responder EXATAMENTE: "{menu_omint2}" NAO '
+            'aceite nem recuse o convenio ainda. NAO mude med/unid/dt/per no $$$.] ' + texto_usuario
+        )
+    elif (
+        rota_agente in (2, 3) and conv_oma.startswith("omint ")
+        and base.get("coleta_medico") and base["coleta_medico"] not in ("sem preferencia", "__CLEAR__")
+        and "[OMINT" not in (base.get("texto_ia") or "") and "[TROCA UNIDADE OMINT" not in (base.get("texto_ia") or "")
+    ):
+        med_oma = _norm(base["coleta_medico"])
+        if conv_oma == "omint premium" and not any(m in med_oma for m in ("giseli", "elias", "jose")):
+            base["coleta_medico"] = ""
+            base["coleta_modo"] = 0
+            base["coleta_data"] = ""
+            base["coleta_periodo"] = ""
+            base["coleta_dia_semana"] = ""
+            clear_pm_omp = base.get("_clear_pm") or {}
+            clear_pm_omp.update({"dt": 1, "per": 1, "ds": 1})
+            base["_clear_pm"] = clear_pm_omp
+            ask_omp = next((m for m in ("stephanie", "juliana", "fernanda", "caio", "torcuato") if m in txt_oma), "")
+            full_omp = {
+                "stephanie": "a Dra. Stephanie Rugeri de Souza", "juliana": "a Dra. Juliana Paulino do Amaral",
+                "fernanda": "a Dra. Fernanda Butura Broetto", "caio": "o Dr. Caio Vinicius Saettini",
+                "torcuato": "o Dr. Torcuato Sanchez Rojas Neto",
+            }
+            extra_omp = f'Infelizmente {full_omp[ask_omp]} não atende pelo Omint Premium. ' if ask_omp else ""
+            base["texto_ia"] = (
+                '[OMINT PREMIUM MEDICO INVALIDO: pelo Omint Premium atendem SOMENTE Dra. Giseli Rebechi, Dr. '
+                'Elias Lobo Braga e Dr. Jose Emmanuel Burle Neto (nas duas unidades). Setar med="", modo=0 no '
+                f'$$$. Responder EXATAMENTE: "{extra_omp}Pelo Omint Premium atendemos com a Dra. Giseli, o Dr. '
+                'Elias ou o Dr. José Emmanuel. Com qual deles prefere? 😊" NAO chame buscar_agenda.] ' + texto_usuario
+            )
+        elif conv_oma in ("omint skill", "omint corporation") and "torcuato" not in med_oma:
+            cat_oma = "Omint Skill" if conv_oma == "omint skill" else "Omint Corporation"
+            if "Tatu" in (base.get("coleta_unidade") or ""):
+                base["coleta_medico"] = ""
+                base["coleta_modo"] = 0
+                base["coleta_data"] = ""
+                base["coleta_periodo"] = ""
+                base["coleta_dia_semana"] = ""
+                clear_pm_oms1 = base.get("_clear_pm") or {}
+                clear_pm_oms1.update({"dt": 1, "per": 1, "ds": 1})
+                base["_clear_pm"] = clear_pm_oms1
+                base["texto_ia"] = (
+                    f'[OMINT SO VILA OLIMPIA: o {cat_oma} e atendido SOMENTE na Vila Olimpia, pelo Dr. Torcuato '
+                    f'Sanchez Rojas Neto. Setar med="", modo=0 no $$$ (NAO mude unid ainda). Responder '
+                    f'EXATAMENTE: "O {cat_oma} é atendido apenas na unidade Vila Olímpia, pelo Dr. Torcuato '
+                    'Sanchez Rojas Neto. Deseja mudar para a Vila Olímpia? 😊"] ' + texto_usuario
+                )
+            else:
+                base["coleta_medico"] = "Dr. Torcuato Sanchez Rojas Neto"
+                base["coleta_modo"] = 3
+                base["coleta_data"] = ""
+                base["coleta_periodo"] = ""
+                base["coleta_dia_semana"] = ""
+                clear_pm_oms2 = base.get("_clear_pm") or {}
+                clear_pm_oms2.update({"dt": 1, "per": 1, "ds": 1})
+                base["_clear_pm"] = clear_pm_oms2
+                ask_oms = next(
+                    (m for m in ("giseli", "elias", "jose", "stephanie", "juliana", "fernanda", "caio")
+                     if m in txt_oma),
+                    "",
+                )
+                full_oms = {
+                    "giseli": "a Dra. Giseli Rebechi", "elias": "o Dr. Elias Lobo Braga",
+                    "jose": "o Dr. Jose Emmanuel Burle Neto", "stephanie": "a Dra. Stephanie Rugeri de Souza",
+                    "juliana": "a Dra. Juliana Paulino do Amaral", "fernanda": "a Dra. Fernanda Butura Broetto",
+                    "caio": "o Dr. Caio Vinicius Saettini",
+                }
+                extra_oms = f'Infelizmente {full_oms[ask_oms]} não atende pelo {cat_oma}. ' if ask_oms else ""
+                base["texto_ia"] = (
+                    f'[OMINT TORCUATO: o {cat_oma} e atendido SOMENTE pelo Dr. Torcuato Sanchez Rojas Neto, na '
+                    'Vila Olimpia. Setar med="Dr. Torcuato Sanchez Rojas Neto", modo=3, dt="", per="", ds="" no '
+                    f'$$$. Responder EXATAMENTE: "{extra_oms}Pelo {cat_oma} o atendimento é com o Dr. Torcuato '
+                    'Sanchez Rojas Neto — ele atende quarta (só tarde), quinta e sexta. Quer seguir com ele? 😊 '
+                    'Se preferir, posso te passar para um atendente." NAO chame buscar_agenda.] ' + texto_usuario
+                )
+
+    # (e) FIX_OMINT_MENCAO_MEDICO: paciente pergunta por medico fora do credenciamento da categoria
+    if (
+        rota_agente in (2, 3) and conv_oma.startswith("omint ")
+        and "[OMINT" not in (base.get("texto_ia") or "") and not re.search(r"particular|\bpart\b", txt_oma)
+    ):
+        rx_ome = {
+            "giseli": r"\bgisel?l?[iey]\b|\bgizel[iy]\b", "elias": r"\belias\b|\bhelias\b",
+            "jose": r"\bjose\b|\bemm?anuel\b|\bburle\b", "stephanie": r"\be?st[ea](f|ph)an[iy]e?\b",
+            "juliana": r"\bjuliana\b", "fernanda": r"\bfernanda\b", "caio": r"\bcaio\b",
+            "torcuato": r"\btor[ckq]u?at[ou]\b",
+        }
+        full_ome = {
+            "giseli": "a Dra. Giseli Rebechi", "elias": "o Dr. Elias Lobo Braga",
+            "jose": "o Dr. Jose Emmanuel Burle Neto", "stephanie": "a Dra. Stephanie Rugeri de Souza",
+            "juliana": "a Dra. Juliana Paulino do Amaral", "fernanda": "a Dra. Fernanda Butura Broetto",
+            "caio": "o Dr. Caio Vinicius Saettini", "torcuato": "o Dr. Torcuato Sanchez Rojas Neto",
+        }
+        eh_skill_corp_ome = conv_oma in ("omint skill", "omint corporation")
+        permitidos_ome = ["torcuato"] if eh_skill_corp_ome else ["giseli", "elias", "jose"]
+        nomes_pac_ome = [_norm(p.get("nome") or "") for p in (base.get("pacientes") or [])]
+        menc_ome = ""
+        for m, rx in rx_ome.items():
+            if m in permitidos_ome or not re.search(rx, txt_oma):
+                continue
+            if any(re.search(rx, n) or m in n for n in nomes_pac_ome):
+                continue
+            menc_ome = m
+            break
+        if menc_ome:
+            cat_nome_ome = base.get("coleta_convenio")
+            if eh_skill_corp_ome:
+                base["texto_ia"] = (
+                    f'[OMINT MEDICO FORA DO CONVENIO: paciente perguntou por {full_ome[menc_ome]}, que NAO '
+                    f'atende pelo {cat_nome_ome}. REGRA DA CLINICA: NAO mencione particular nem outro convenio. '
+                    f'Responder EXATAMENTE: "Infelizmente {full_ome[menc_ome]} não atende pelo {cat_nome_ome}. '
+                    f'Pelo {cat_nome_ome} o atendimento é com o Dr. Torcuato Sanchez Rojas Neto, na Vila Olímpia '
+                    '(quarta só à tarde, quinta e sexta). Quer seguir com ele? 😊 Se preferir, posso te passar '
+                    'para um atendente." NAO mude med/unid/dt/per no $$$. NAO chame buscar_agenda.] ' + texto_usuario
+                )
+            else:
+                base["texto_ia"] = (
+                    f'[OMINT MEDICO FORA DO CONVENIO: paciente perguntou por {full_ome[menc_ome]}, que NAO '
+                    'atende pelo Omint Premium. Responder EXATAMENTE: "Infelizmente '
+                    f'{full_ome[menc_ome]} não atende pelo Omint Premium. Atendemos com a Dra. Giseli, o Dr. '
+                    'Elias ou o Dr. José Emmanuel — com qual deles prefere? 😊" NAO mude med/unid/dt/per no $$$. '
+                    'NAO chame buscar_agenda.] ' + texto_usuario
+                )
+
+    # FIX_67650b: desarme estreito de bypass_agente_humano quando a msg E resposta valida de convenio
+    sess_rota_bp = _int(base.get("sessao_rota"))
+    if (
+        ia_output.get("bypass_agente_humano") and sess_rota_bp in (2, 3)
+        and not base.get("coleta_convenio") and _texto_ia_livre(base)
+    ):
+        txt_bp = _norm(texto_usuario)
+        eh_conv_bp = len(txt_bp.split()) <= 4 and bool(re.match(
+            r"^(pelo |pela |convenio |plano )?(porto( seguro)?|itau|omint|bradesco|particular)[!.,\s]*$", txt_bp,
+        ))
+        if eh_conv_bp:
+            ia_output["bypass_agente_humano"] = False
+            rota_agente = sess_rota_bp
+            intencao_rapida = "coleta"
+
+    # FIX_ULTIMO_CONV: handler do sim/nao quando "quer repetir o mesmo convenio?" esta pendente
+    ult_conv_global = base.get("_ultimo_convenio_global") or ""
+    if (
+        rota_agente in (2, 3) and ult_conv_global and base.get("coleta_data") and base.get("coleta_periodo")
+        and not base.get("coleta_convenio") and _texto_ia_livre(base)
+    ):
+        txt_uc = _norm(texto_usuario)
+        sim_uc = bool(re.match(
+            r"^(s|si|sim|pode|pode ser|quero|claro|isso|ok|bora|vamos|novamente|de novo|mesmo|o mesmo|a mesma|"
+            r"igual|mesma forma|mesmo convenio)[!.,\s]*$", txt_uc,
+        )) or bool(re.match(
+            r"^(s|si|sim|isso|claro|ok|pode)\b.*\b(mesm[oa]( forma| convenio)?|igual|de novo|novamente)\b", txt_uc,
+        )) or (
+            bool(re.search(r"\b(mesma forma|mesmo convenio|o mesmo|de novo|novamente)\b", txt_uc))
+            and len(txt_uc.split()) <= 6
+            and not re.search(r"outr[oa]|\bnao\b|diferente|mudar|trocar", txt_uc)
+        )
+        nao_uc = bool(re.match(
+            r"^(n|nao|outro|outra|nao quero|outro convenio|outra forma|quero outro|prefiro outro)[!.,\s]*$", txt_uc,
+        ))
+        pergunta_uc = bool(re.match(r"^(qual|quais|que|como assim)\b", txt_uc)) or any(
+            p in txt_uc for p in ("outra forma", "outras formas", "opcoes", "opcao")
+        )
+        if sim_uc:
+            if ult_conv_global == "Particular":
+                base["coleta_convenio"] = "PART?"
+                base["texto_ia"] = (
+                    '[ULTIMO CONVENIO PARTICULAR: paciente confirmou repetir Particular. Setar conv="PART?" no '
+                    '$$$. Resposta EXATA:\n"Perfeito! Consulta Particular:\n✔️ Incluso 1 retorno em até 30 '
+                    'dias\n💰 R$ 600,00 no débito ou crédito à vista\n💰 R$ 570,00 via PIX (5% de '
+                    'desconto)\nPosso confirmar como Particular? 😊"\n⛔ NUNCA pule os preços. ⛔ conv="PART?" '
+                    'ate o paciente confirmar. NAO chame buscar_agenda.] ' + texto_usuario
+                )
+            elif ult_conv_global == "Omint":
+                base["coleta_convenio"] = "OMINT?"
+                base["texto_ia"] = (
+                    '[ULTIMO CONVENIO OMINT: paciente confirmou Omint — perguntar a categoria. Setar '
+                    'conv="OMINT?" no $$$. Responder EXATAMENTE: "Qual é a categoria do seu plano Omint? 😊\n'
+                    'Digite o número:\n\n1️⃣ Premium\n2️⃣ Skill\n3️⃣ Corporation\n4️⃣ Não sei informar"] '
+                    + texto_usuario
+                )
+            elif base.get("paciente_encontrado"):
+                base["coleta_convenio"] = ult_conv_global
+                rota_agente = 4
+                base["_sub_rota_agenda"] = "navegacao"
+                intencao_rapida = "agenda"
+                med_uc = (
+                    "sem preferencia" if (_int(base.get("coleta_modo")) == 1 or not base.get("coleta_medico"))
+                    else base["coleta_medico"]
+                )
+                base["texto_ia"] = (
+                    f'[ULTIMO CONVENIO ACEITO: paciente confirmou {ult_conv_global} e a coleta esta completa. '
+                    f'Setar conv="{ult_conv_global}", i="agenda" no $$$. Chame buscar_agenda AGORA com '
+                    f'unid="{base["coleta_unidade"]}", med="{med_uc}", dt="{base["coleta_data"]}", '
+                    f'per="{base["coleta_periodo"]}" e mostre os horarios que a TOOL retornar. ⛔ NUNCA invente '
+                    'horarios.] ' + texto_usuario
+                )
+            else:
+                base["coleta_convenio"] = ult_conv_global
+                base["texto_ia"] = (
+                    f'[ULTIMO CONVENIO ACEITO: paciente confirmou {ult_conv_global}. Setar '
+                    f'conv="{ult_conv_global}" no $$$. Continue a coleta do campo faltante.] ' + texto_usuario
+                )
+        elif nao_uc or pergunta_uc:
+            base["texto_ia"] = (
+                '[ULTIMO CONVENIO RECUSADO: paciente quer ver as opcoes. Responder EXATAMENTE: "Sem problemas! '
+                'Atendemos os convênios Porto Seguro, Itaú, Bradesco e Omint — ou Particular. Qual prefere? 😊" '
+                'NAO mude conv no $$$. Aguarde a resposta.] ' + texto_usuario
+            )
+
+    # FIX_PROTECAO_COLETA_CONVENIO: re-ask sem resetar campos quando texto nao e convenio valido
+    if (
+        rota_agente in (2, 3) and base.get("coleta_medico") and base.get("coleta_unidade")
+        and base.get("coleta_periodo") and not base.get("coleta_convenio") and not base.get("_periodo_precomputed")
+        and not base.get("_autoswitch_fired") and not base.get("_dia_periodo_resolvido") and _texto_ia_livre(base)
+    ):
+        txt_cv = _strip_accents(texto_usuario).lower()
+        eh_conv_valido = bool(re.search(r"particular|porto|itau|bradesco|omint|convenio|plano", txt_cv))
+        eh_troca_assunto_cv = bool(re.search(
+            r"giseli|elias|emmanuel|stephanie|juliana|torcuato|fernanda|\bcaio\b|\bjose\b|medic[oa]|doutor|"
+            r"\bdra?\b|segunda|terca|quarta|quinta|sexta|sabado|amanha|semana que vem|vila ol|tatuap|manha|"
+            r"tarde|outro dia|outra unidade|outro horario", txt_cv,
+        ))
+        if not eh_conv_valido and not eh_troca_assunto_cv:
+            txt_cvt = txt_cv.strip()
+            eh_conf_continuar_cv = bool(re.match(
+                r"^(s|si|sim|quero|quero sim|sim quero|pode|pode ser|ok|claro|isso|bora|vamos|continuar|quero "
+                r"continuar|pode continuar|vamos continuar)$", txt_cvt,
+            )) or (
+                bool(re.match(r"^(s|si|sim|pode|ok|claro|isso|quero)\b", txt_cvt))
+                and not re.search(r"\bnao\b|outr[oa]|diferente|trocar|mudar", txt_cvt)
+            )
+            if eh_conf_continuar_cv:
+                base["texto_ia"] = (
+                    '[CONTINUAR COLETA CONVENIO: paciente confirmou que quer continuar o agendamento. Responder '
+                    'EXATAMENTE: "A consulta será Particular ou Convênio? 😊" ⛔ NAO diga que nao atendemos. NAO '
+                    'zere d/c/n/unid/med/dt/per/ds no $$$. Preservar TODOS os campos.] ' + (base.get("texto_ia") or "")
+                )
+            elif re.match(r"^(qual|quais|que|como|onde|quando|quanto)\b", txt_cv) or "?" in txt_cv:
+                base["texto_ia"] = (
+                    '[CONVENIO OPCOES: paciente perguntou as opcoes de pagamento. Responder EXATAMENTE: '
+                    '"Atendemos os convênios Porto Seguro, Itaú, Bradesco e Omint — ou Particular (R$ 600,00 no '
+                    'débito/crédito ou R$ 570,00 via PIX, com 1 retorno incluso). Qual prefere? 😊" NAO zere '
+                    'd/c/n/unid/med/dt/per/ds no $$$. Preservar TODOS os campos.] ' + (base.get("texto_ia") or "")
+                )
+            else:
+                base["texto_ia"] = (
+                    f'[CONVENIO INVALIDO: paciente respondeu "{texto_usuario}" mas esperamos convenio. '
+                    'Responder EXATAMENTE: "Infelizmente nao atendemos esse convenio 😔 Atendemos Porto Seguro, '
+                    'Itau, Bradesco e Omint. A consulta sera Particular ou com algum desses convenios? 😊" NAO '
+                    'zere d/c/n/unid/med/dt/per/ds no $$$. Preservar TODOS os campos.] ' + (base.get("texto_ia") or "")
+                )
+
+    return ResultadoParte11(base=base, intencao_rapida=intencao_rapida, rota_agente=rota_agente)
