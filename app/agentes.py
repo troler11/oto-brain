@@ -11,20 +11,22 @@ puro) já sabe interpretar, então o parsing/canonicalização que já existe e 
 app/eif1.py continua funcionando sem NENHUMA mudança — só troca a origem do "raw" (texto cru
 de um nó LangChain do n8n → JSON validado por schema desta chamada).
 
-Ainda não tem prompts portados aqui (os 9 `_proposed_Agente_*_systemMessage.txt` do DEPLOY
-continuam como referência de conteúdo, não copiados 1:1 — adaptar um prompt de "responda nesse
-formato de texto com $$$ no final" pra "responda dentro deste schema" é trabalho de prompt
-engineering, não tradução mecânica de código, e fica pra quando Lucas revisar/aprovar cada um).
+Os 9 prompts de agente (`prompts/agente_*.txt`) e o classificador (`IAOutputClassificador`,
+port do nó "AI Agent" que roda ANTES do Extrair Rota, `prompts/ai_agent_classificador.txt`)
+foram adaptados desse jeito e aprovados por Lucas — ver `app.dispatcher` pro roteamento dos 9,
+e `classificar_intencao()` abaixo pro classificador.
 """
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
 from app.config import OPENAI_API_KEY
+from app.template_engine import renderizar
 
 MODEL_PADRAO = "gpt-4o-2024-08-06"
 
@@ -85,3 +87,44 @@ def empacotar_para_eif1(resposta: RespostaAgente) -> str:
         {"output": resposta.mensagem, "meta": resposta.estado.model_dump()},
         ensure_ascii=False,
     )
+
+
+class IAOutputClassificador(BaseModel):
+    """Port do nó "AI Agent" (DEPLOY, classificador fixo que roda ANTES do Extrair Rota) —
+    mesmos campos e nomes do JSON que o node original retornava (`ia_output` que
+    `app.er.processar()` recebe como parâmetro `ai_agent_json`). Roteador puro: não gera texto
+    pro paciente, só um palpite de intenção/rota que o ER confirma ou sobrescreve via guards."""
+
+    intencao_rapida: str = "triagem"
+    rota_agente: int = 0
+    eh_confirmacao: bool = False
+    eh_navegacao: bool = False
+    eh_confirmacao_cancelamento: bool = False
+    eh_resposta_generica: bool = False
+    bypass_agente_humano: bool = False
+    precisa_agente_completo: bool = True
+
+
+_PROMPT_CLASSIFICADOR = (
+    Path(__file__).resolve().parent.parent / "prompts" / "ai_agent_classificador.txt"
+).read_text(encoding="utf-8")
+
+
+def classificar_intencao(
+    contexto: dict,
+    *,
+    client: OpenAI | None = None,
+    model: str = MODEL_PADRAO,
+) -> IAOutputClassificador:
+    """Chama o classificador (port do nó "AI Agent"). `contexto` precisa ter
+    `sessao_intencao`/`sessao_rota`/`cache_ativo` (lidos como `$('Montar Contexto')...`) e
+    `mensagem_agrupada` (lido como `$('6. Agrupar Textos1')...`) — ver `app.template_engine`
+    pra como esses refs são resolvidos. `client` injetável pra teste, igual `chamar_agente`."""
+    client = client or OpenAI(api_key=OPENAI_API_KEY)
+    prompt = renderizar(_PROMPT_CLASSIFICADOR, contexto, {})
+    completion = client.beta.chat.completions.parse(
+        model=model,
+        messages=[{"role": "system", "content": prompt}],
+        response_format=IAOutputClassificador,
+    )
+    return completion.choices[0].message.parsed

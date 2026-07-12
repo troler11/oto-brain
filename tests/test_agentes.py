@@ -7,7 +7,14 @@ mockado. Cobre também o round-trip com app.eif1.processar(), que é o ponto int
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
-from app.agentes import EstadoConsulta, RespostaAgente, chamar_agente, empacotar_para_eif1
+from app.agentes import (
+    EstadoConsulta,
+    IAOutputClassificador,
+    RespostaAgente,
+    chamar_agente,
+    classificar_intencao,
+    empacotar_para_eif1,
+)
 from app.eif1 import processar as processar_eif1
 
 SESSAO_ATIVA = {"sessao_intencao": "coleta", "sessao_atualizada_em": datetime.now(timezone.utc).isoformat()}
@@ -89,3 +96,49 @@ def test_round_trip_terceiro_e_dados_pessoais():
     assert r.nome_dependente == "Miguel Bueno"
     assert r.cpf_dependente == "11144477735"
     assert r.nascimento_dependente == "17/12/2018"
+
+
+# ---------- classificar_intencao (port do nó "AI Agent") ----------
+
+def test_classificar_intencao_retorna_resposta_parseada():
+    esperado = IAOutputClassificador(intencao_rapida="agenda", rota_agente=2)
+    client = _mock_client(esperado)
+    contexto = {
+        "sessao_intencao": "", "sessao_rota": 0, "cache_ativo": False,
+        "mensagem_agrupada": "quero agendar uma consulta",
+    }
+    r = classificar_intencao(contexto, client=client)
+    assert r is esperado
+
+
+def test_classificar_intencao_resolve_placeholders_no_prompt():
+    esperado = IAOutputClassificador()
+    client = _mock_client(esperado)
+    contexto = {
+        "sessao_intencao": "coleta", "sessao_rota": 2, "cache_ativo": True,
+        "mensagem_agrupada": "quero para minha filha",
+    }
+    classificar_intencao(contexto, client=client)
+    prompt_enviado = client.beta.chat.completions.parse.call_args.kwargs["messages"][0]["content"]
+    assert "{{" not in prompt_enviado
+    assert "quero para minha filha" in prompt_enviado
+    assert "Intenção Atual: coleta" in prompt_enviado
+    assert "Rota Atual: 2" in prompt_enviado
+
+
+def test_classificar_intencao_usa_response_format_correto():
+    esperado = IAOutputClassificador()
+    client = _mock_client(esperado)
+    classificar_intencao({"sessao_intencao": "", "sessao_rota": 0, "cache_ativo": False, "mensagem_agrupada": "oi"}, client=client)
+    kwargs = client.beta.chat.completions.parse.call_args.kwargs
+    assert kwargs["response_format"] is IAOutputClassificador
+
+
+def test_ia_output_classificador_defaults_fieis_ao_no_original():
+    d = IAOutputClassificador().model_dump()
+    assert d == {
+        "intencao_rapida": "triagem", "rota_agente": 0, "eh_confirmacao": False,
+        "eh_navegacao": False, "eh_confirmacao_cancelamento": False,
+        "eh_resposta_generica": False, "bypass_agente_humano": False,
+        "precisa_agente_completo": True,
+    }

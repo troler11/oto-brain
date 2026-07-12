@@ -35,7 +35,7 @@ import re
 
 _EXPR_RE = re.compile(r"\{\{(.*?)\}\}", re.DOTALL)
 
-_RE_MC_FIELD = re.compile(r"^\$\('Montar Contexto'\)\.first\(\)\.json\.(\w+)\s*(?:\|\|\s*(.+))?$")
+_RE_MC_FIELD = re.compile(r"^\$\('[^']+'\)\.first\(\)\.json\.(\w+)\s*(?:\|\|\s*(.+))?$")
 _RE_JSON_FIELD = re.compile(r"^\$json\.(\w+)\s*(?:\|\|\s*(.+))?$")
 _RE_JSON_PROXIMAS = re.compile(r"^\$json\.proximas\??\.(\w+)\s*(?:\|\|\s*(.+))?$")
 _RE_SELF_TERNARY = re.compile(r"^\$json\.(\w+) \? \$json\.\1 : (.+)$")
