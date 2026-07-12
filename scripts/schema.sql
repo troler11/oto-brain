@@ -23,3 +23,21 @@ CREATE TABLE IF NOT EXISTS conversas_log (
 CREATE INDEX IF NOT EXISTS idx_conversas_log_telefone   ON conversas_log (telefone);
 CREATE INDEX IF NOT EXISTS idx_conversas_log_started_at ON conversas_log (started_at);
 CREATE INDEX IF NOT EXISTS idx_conversas_log_status     ON conversas_log (status);
+
+-- Memória por paciente (Fase 4, bootstrap) — derivada de contatos_whatsapp + agendamentos,
+-- que JÁ vivem nesta mesma base (não é cópia de outro sistema). Preferências consolidadas
+-- pra injetar no contexto do agente sem re-perguntar ("agendar com a Dra. X de novo?").
+CREATE TABLE IF NOT EXISTS paciente_memoria (
+  telefone              TEXT PRIMARY KEY,
+  nome_titular          TEXT,
+  cpf_titular            TEXT,
+  ultimo_medico         TEXT,
+  ultima_unidade        TEXT,
+  ultimo_convenio       TEXT,
+  ultimo_periodo        TEXT,
+  ultima_data_consulta  DATE,
+  total_agendamentos    INTEGER NOT NULL DEFAULT 0,
+  primeira_interacao    TIMESTAMPTZ,
+  ultima_interacao      TIMESTAMPTZ,
+  atualizado_em         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
