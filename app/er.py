@@ -59,6 +59,14 @@ arquivo cobre, em fatias sucessivas:
     node no JS original e reusados por vários blocos depois, inclusive o FAQ_INJECT — entram
     aqui como parâmetros vindos de `ResultadoIntake` (Parte 1), não recomputados, pra preservar
     o valor de INÍCIO de turno mesmo depois de guards posteriores mutarem `base`.
+  PARTE 10 (linhas 3691-3982): FIX_PORTO_ITAU_DETERMINISTIC (aceita Porto Seguro/Itaú sem
+    depender do LLM), FIX_QUALQUER_UM_MODO2, FIX_DIA_SEMANA_DISAMBIGUACAO (dia da semana sem
+    médico escolhido → lista médicos daquele dia, com data absoluta tipo "3 de agosto"/"03/08"
+    também parseada e validada contra a grade), FIX_PERIODO_DETERMINISTIC, FIX_DIA_SEMANA_GUARD
+    (evita o LLM assumir um dia silenciosamente quando o texto não é dia nem médico nem "o
+    próximo"), FIX_MESMO_MEDICO ("quero o mesmo médico de sempre"), FIX_MENU_P3_INVALIDO,
+    FIX_CONVENIO_GENERICO. Mais 2 tabelas de grade reaproveitadas (`_DLU_PERIODO`/`_GRADE_TEXTO`/
+    `_GRADE_DP`, já existentes desde as Partes 5-6) confirmadas byte-a-byte idênticas de novo.
 O resto (guards de criação de consulta, cancelamento, empacotamento final) fica pra próximas
 fatias — cada uma seguindo o mesmo padrão de port fiel + testes.
 
@@ -4514,3 +4522,398 @@ def processar_menu_p3_e_faq(
             base["texto_ia"] = faq_resp + faq_retomada + f'\n\n[Mensagem original: {texto_usuario}]'
 
     return ResultadoParte9(base=base, intencao_rapida=intencao_rapida, rota_agente=rota_agente)
+
+
+# ---------------------------------------------------------------------------------------------
+# PARTE 10 (linhas 3691-3982)
+# ---------------------------------------------------------------------------------------------
+
+_MPD_VO = {
+    "segunda": (
+        ("Dr.", "Jose Emmanuel Burle Neto", "manhã e tarde"),
+        ("Dra.", "Stephanie Rugeri de Souza", "manhã (teleconsulta) e tarde"),
+        ("Dra.", "Juliana Paulino do Amaral", "tarde"),
+    ),
+    "terca": (
+        ("Dra.", "Giseli Rebechi", "manhã e tarde"),
+        ("Dr.", "Elias Lobo Braga", "tarde"),
+        ("Dra.", "Stephanie Rugeri de Souza", "manhã (teleconsulta)"),
+        ("Dr.", "Caio Vinicius Saettini", "manhã"),
+    ),
+    "quarta": (
+        ("Dra.", "Giseli Rebechi", "manhã"),
+        ("Dr.", "Elias Lobo Braga", "manhã e tarde"),
+        ("Dr.", "Jose Emmanuel Burle Neto", "manhã"),
+        ("Dra.", "Stephanie Rugeri de Souza", "tarde"),
+        ("Dr.", "Torcuato Sanchez Rojas Neto", "tarde"),
+    ),
+    "quinta": (
+        ("Dr.", "Jose Emmanuel Burle Neto", "manhã e tarde"),
+        ("Dr.", "Torcuato Sanchez Rojas Neto", "manhã e tarde"),
+        ("Dra.", "Fernanda Butura Broetto", "tarde"),
+    ),
+    "sexta": (
+        ("Dra.", "Giseli Rebechi", "manhã"),
+        ("Dr.", "Torcuato Sanchez Rojas Neto", "manhã e tarde"),
+        ("Dra.", "Juliana Paulino do Amaral", "tarde"),
+    ),
+}
+_MPD_TAT = {
+    "segunda": (("Dr.", "Elias Lobo Braga", "manhã e tarde"),),
+    "terca": (("Dr.", "Jose Emmanuel Burle Neto", "manhã e tarde"),),
+    "quarta": (("Dr.", "Caio Vinicius Saettini", "manhã e tarde"),),
+    "quinta": (("Dra.", "Giseli Rebechi", "manhã e tarde"),),
+    "sexta": (("Dr.", "Elias Lobo Braga", "manhã"), ("Dra.", "Fernanda Butura Broetto", "tarde")),
+}
+
+_MESES_DA = {
+    "janeiro": 1, "fevereiro": 2, "marco": 3, "abril": 4, "maio": 5, "junho": 6, "julho": 7,
+    "agosto": 8, "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12,
+}
+_DOW_TO_AB_DA = ("dom", "seg", "ter", "qua", "qui", "sex", "sab")
+_FULL_DA = {"seg": "segunda", "ter": "terça", "qua": "quarta", "qui": "quinta", "sex": "sexta",
+            "sab": "sábado", "dom": "domingo"}
+
+
+def _parse_data_abs_dsg(t: str):
+    m = re.search(
+        r"\b(\d{1,2})\s*(?:de\s+)?(janeiro|fevereiro|marco|abril|maio|junho|julho|agosto|setembro|outubro|"
+        r"novembro|dezembro)\b", t,
+    )
+    if m:
+        return {"d": int(m.group(1)), "mo": _MESES_DA[m.group(2)]}
+    m = re.search(r"\b(\d{1,2})[/\-](\d{1,2})\b", t)
+    if m and 1 <= int(m.group(2)) <= 12:
+        return {"d": int(m.group(1)), "mo": int(m.group(2))}
+    m = re.search(r"\bdia\s+(\d{1,2})\b", t)
+    if m:
+        return {"d": int(m.group(1)), "mo": 0}
+    return None
+
+
+@dataclass
+class ResultadoParte10:
+    base: dict
+    intencao_rapida: str
+    rota_agente: int
+
+
+def processar_convenio_e_dia_deterministico(
+    base: dict,
+    texto_usuario: str,
+    intencao_rapida: str,
+    rota_agente: int,
+) -> ResultadoParte10:
+    """Linhas 3691-3982 do JS fonte: aceite determinístico de Porto Seguro/Itaú,
+    "qualquer um" pós-desambiguação, dia da semana sem médico (com parsing de data absoluta tipo
+    "3 de agosto"), período determinístico, guard anti-assunção-silenciosa de dia, "mesmo médico
+    de sempre", menu P3 inválido e convênio genérico."""
+
+    # FIX_PORTO_ITAU_DETERMINISTIC: aceitar Porto Seguro e Itaú deterministicamente
+    if rota_agente in (2, 3) and base.get("coleta_unidade"):
+        txt_conv_pi = _norm(texto_usuario)
+        conv_atual = (base.get("coleta_convenio") or "").lower()
+        conv_vazio = not conv_atual or conv_atual in ("part?", "reset_conv")
+        eh_pergunta_pi = any(p in txt_conv_pi for p in ("?", "qual", "aceita", "cobre", "quais"))
+        conv_detect = ""
+        if not eh_pergunta_pi and conv_vazio:
+            if "porto" in txt_conv_pi or txt_conv_pi == "ps":
+                conv_detect = "Porto Seguro"
+            elif "itau" in txt_conv_pi:
+                conv_detect = "Itaú"
+        if conv_detect:
+            unid_pi = base.get("coleta_unidade") or ""
+            per_pi = base.get("coleta_periodo") or "manhã"
+            base["coleta_convenio"] = conv_detect
+            identidade_incompleta_pi = not base.get("paciente_encontrado")
+            if base.get("coleta_data") and base.get("coleta_periodo") and not identidade_incompleta_pi:
+                med_busca_pi = (
+                    "sem preferencia" if (_int(base.get("coleta_modo")) == 1 or not base.get("coleta_medico"))
+                    else base["coleta_medico"]
+                )
+                rota_agente = 4
+                base["_sub_rota_agenda"] = "navegacao"
+                intencao_rapida = "agenda"
+                base["texto_ia"] = (
+                    f'[CONV ACEITO + BUSCAR AGENDA: {conv_detect} aceito e coleta completa. Setar '
+                    f'conv="{conv_detect}", i="agenda" no $$$. Chame buscar_agenda AGORA com unid="{unid_pi}", '
+                    f'med="{med_busca_pi}", dt="{base["coleta_data"]}", per="{base["coleta_periodo"]}". Comece a '
+                    f'resposta com "Ótimo! Consulta como {conv_detect} na {unid_pi}, pela {per_pi}." e mostre os '
+                    'horarios que a TOOL retornar. ⛔ NUNCA invente horarios. ⛔ NAO pergunte "Posso verificar os '
+                    'horários?". NAO diga "nao atendemos".] ' + texto_usuario
+                )
+            else:
+                base["texto_ia"] = (
+                    f'[CONV ACEITO: {conv_detect}] Resposta EXATA: "Ótimo! Consulta como {conv_detect} na '
+                    f'{unid_pi}, pela {per_pi}. Posso verificar os horários disponíveis? 😊" Setar '
+                    f'conv="{conv_detect}" no $$$. NAO diga "nao atendemos". NAO ofereça particular.'
+                )
+
+    # FIX_QUALQUER_UM_MODO2: "qualquer um"/"tanto faz" apos desambiguacao -> modo=2
+    if rota_agente in (2, 3) and base.get("coleta_dia_semana") and not base.get("coleta_medico"):
+        txt_qu = _norm(texto_usuario)
+        if txt_qu in (
+            "qualquer um", "qualquer", "tanto faz", "qualquer medico", "qualquer um deles", "qualquer uma",
+            "qualquer uma delas",
+        ):
+            base["coleta_medico"] = "sem preferencia"
+            base["coleta_modo"] = 2
+            base["_modo2_precomputed"] = True
+
+    # FIX_DIA_SEMANA_DISAMBIGUACAO: dia da semana + sem medico -> lista medicos daquele dia
+    if (
+        rota_agente in (2, 3) and base.get("coleta_unidade") and not base.get("coleta_medico")
+        and not base.get("coleta_dia_semana")
+    ):
+        txt_dia = _norm(texto_usuario)
+        dia_match = re.match(
+            r"^(segunda|seg|terca|ter|quarta|qua|quinta|qui|sexta|sex)(?:\s*[-.]?\s*feira)?$", txt_dia,
+        )
+        if dia_match:
+            dm = {"segunda": "segunda", "seg": "segunda", "terca": "terca", "ter": "terca", "quarta": "quarta",
+                  "qua": "quarta", "quinta": "quinta", "qui": "quinta", "sexta": "sexta", "sex": "sexta"}
+            dn = {"segunda": 1, "terca": 2, "quarta": 3, "quinta": 4, "sexta": 5}
+            disp = {"segunda": "segunda", "terca": "terça", "quarta": "quarta", "quinta": "quinta", "sexta": "sexta"}
+            dia_nome = dm[dia_match.group(1)]
+            dia_disp = disp[dia_nome]
+            eh_vo = "ol" in (base.get("coleta_unidade") or "").lower()
+            meds = (_MPD_VO if eh_vo else _MPD_TAT).get(dia_nome, ())
+            if len(meds) == 1:
+                t_m, n_m, p_m = meds[0]
+                base["coleta_medico"] = n_m.split(" ")[0]
+                base["coleta_modo"] = 3
+                base["coleta_dia_semana"] = dia_nome
+                base["_modo2_precomputed"] = True
+                base["coleta_data"] = _proxima_data_dow(dn[dia_nome])
+            elif len(meds) > 1:
+                base["coleta_dia_semana"] = dia_nome
+                base["_dia_semana_precomputed"] = True
+                base["coleta_data"] = _proxima_data_dow(dn[dia_nome])
+                lista = f"Na {dia_disp}-feira temos:\n"
+                for t_m, n_m, p_m in meds:
+                    lista += f"• {t_m} {n_m} ({p_m})\n"
+                lista += 'Qual médico você prefere? Ou se quiser qualquer um, diga "qualquer um" 😊'
+                base["texto_ia"] = f"[MÉDICOS NA {dia_disp.upper()}] " + lista
+
+    # FIX_PERIODO_DETERMINISTIC: seta periodo quando msg e manha/tarde
+    if (
+        rota_agente in (2, 3) and base.get("coleta_unidade") and not base.get("coleta_horario")
+        and not base.get("_dia_periodo_resolvido")
+    ):
+        txt_per = _norm(texto_usuario)
+        if txt_per in ("manha", "de manha", "pela manha"):
+            base["coleta_periodo"] = "manha"
+            base["_periodo_precomputed"] = True
+        elif txt_per in ("tarde", "de tarde", "pela tarde"):
+            base["coleta_periodo"] = "tarde"
+            base["_periodo_precomputed"] = True
+
+        if (
+            base.get("_periodo_precomputed") and ("manha" in txt_per or "tarde" in txt_per)
+            and not base.get("coleta_data") and _texto_ia_livre(base)
+        ):
+            mk_pp = _medico_key(_norm(base.get("coleta_medico") or ""))
+            if mk_pp:
+                per_pp = base["coleta_periodo"]
+                per_txt_pp = "manhã" if per_pp == "manha" else "tarde"
+                uk_pp = "Tatuapé" if "Tatu" in (base.get("coleta_unidade") or "") else "Vila Olímpia"
+                gm_pp = _GRADE_DP.get(uk_pp, {}).get(mk_pp, {})
+                dias_pp = [_DS_FULL_DP[d] for d in gm_pp if per_pp in gm_pp[d]]
+                conv_ok_pp = bool(base.get("coleta_convenio")) and base["coleta_convenio"] not in (
+                    "PART?", "OMINT?", "RESET_CONV",
+                )
+                nao_conv_pp = f' ⛔ NAO pergunte convenio (ja salvo: {base["coleta_convenio"]}).' if conv_ok_pp else ""
+                if dias_pp:
+                    dias_txt_pp = (
+                        ", ".join(dias_pp[:-1]) + " e " + dias_pp[-1] if len(dias_pp) > 1 else dias_pp[0]
+                    )
+                    base["texto_ia"] = (
+                        f'[PERIODO RESOLVIDO: per="{per_pp}" confirmado. Setar per="{per_pp}" no $$$ e '
+                        f'PRESERVAR conv/med/unid. Responder EXATAMENTE: "Pela {per_txt_pp} '
+                        f'{base["coleta_medico"]} atende {dias_txt_pp}. Qual dia prefere? 😊"{nao_conv_pp} ⛔ '
+                        'NAO re-pergunte periodo.] ' + texto_usuario
+                    )
+                else:
+                    base["coleta_periodo"] = ""
+                    base["_periodo_precomputed"] = False
+                    clear_pm_pp = base.get("_clear_pm") or {}
+                    clear_pm_pp["per"] = 1
+                    base["_clear_pm"] = clear_pm_pp
+                    grade_pp = _GRADE_TEXTO.get(uk_pp, {}).get(mk_pp, "")
+                    base["texto_ia"] = (
+                        f'[PERIODO INDISPONIVEL: {base["coleta_medico"]} NAO atende pela {per_txt_pp} na '
+                        f'{uk_pp}. Setar per="" no $$$ e PRESERVAR conv/med/unid. Responder EXATAMENTE: '
+                        f'"{base["coleta_medico"]} não atende pela {per_txt_pp} na {uk_pp} — os dias de '
+                        f'atendimento são: {grade_pp}. Qual dia prefere? 😊"{nao_conv_pp}] ' + texto_usuario
+                    )
+
+    # FIX_DIA_SEMANA_GUARD: modo=3 + medico set + dia vazio + texto nao e dia nem medico
+    if (
+        rota_agente in (2, 3) and _int(base.get("coleta_modo")) == 3
+        and base.get("coleta_medico") and base.get("coleta_medico") != "__CLEAR__"
+        and not base.get("coleta_dia_semana") and not base.get("_periodo_precomputed") and _texto_ia_livre(base)
+    ):
+        txt_dsg = _norm(texto_usuario)
+        eh_dia_dsg = bool(re.search(r"segunda|terca|quarta|quinta|sexta|\bseg\b|\bter\b|\bqua\b|\bqui\b|\bsex\b", txt_dsg))
+        eh_nome_dsg = any(m in txt_dsg for m in _NOMES_DOCS_NMO)
+        if not eh_dia_dsg and not eh_nome_dsg:
+            eh_qualquer_dsg = bool(re.search(
+                r"proximo|proxim|primeiro|qualquer|tanto faz|disponiv|pode ser|qualquer um|sem prefer", txt_dsg,
+            ))
+            mk_dsg = _medico_key(_norm(base.get("coleta_medico") or ""))
+            dias_med_dsg = _GRADE_TEXTO.get(base.get("coleta_unidade"), {}).get(mk_dsg, "")
+
+            dados_tratada = False
+            da = _parse_data_abs_dsg(txt_dsg) if base.get("coleta_unidade") else None
+            if da and 1 <= da["d"] <= 31:
+                hoje_str_da = (
+                    base["hoje"] if re.match(r"^\d{4}-\d{2}-\d{2}$", base.get("hoje") or "")
+                    else _hoje_sp().strftime("%Y-%m-%d")
+                )
+                hoje_da = datetime.strptime(hoje_str_da, "%Y-%m-%d").date()
+                mo_da = da["mo"] or hoje_da.month
+                dt_da = _ymd_overflow(hoje_da.year, mo_da, da["d"])
+                if dt_da < hoje_da:
+                    dt_da = (
+                        _ymd_overflow(hoje_da.year, mo_da + 1, da["d"]) if da["mo"] == 0
+                        else _ymd_overflow(hoje_da.year + 1, mo_da, da["d"])
+                    )
+                dados_tratada = True
+                ab_da = _DOW_TO_AB_DA[_dow_js(dt_da.strftime("%Y-%m-%d"))]
+                dt_str_da = dt_da.strftime("%Y-%m-%d")
+                per_grade_da = _DLU_PERIODO.get(base["coleta_unidade"], {}).get(mk_dsg, {}).get(ab_da)
+                if not per_grade_da:
+                    base["texto_ia"] = (
+                        f'[DATA INVALIDA MEDICO: {base["coleta_medico"]} nao atende '
+                        f'{_FULL_DA.get(ab_da, ab_da)} ({dt_str_da}) no {base["coleta_unidade"]}. Atende: '
+                        f'{dias_med_dsg or "[dias]"}. Responder EXATAMENTE: "No dia {dt_str_da.split("-")[2]}/'
+                        f'{dt_str_da.split("-")[1]} ({_FULL_DA.get(ab_da, ab_da)}) o {base["coleta_medico"]} nao '
+                        f'atende em {base["coleta_unidade"]}. {base["coleta_medico"]} atende '
+                        f'{dias_med_dsg or "[dias]"}. Qual dia prefere? 😊" NAO grave data. NAO mude '
+                        'med/unid/modo/ds no $$$] ' + (base.get("texto_ia") or "")
+                    )
+                else:
+                    base["coleta_data"] = dt_str_da
+                    base["coleta_dia_semana"] = ab_da
+                    if per_grade_da == "Ambos":
+                        base["texto_ia"] = (
+                            f'[DATA OK: {dt_str_da} = {_FULL_DA[ab_da]}, {base["coleta_medico"]} atende. Setar '
+                            f'dt="{dt_str_da}", ds="{ab_da}", modo=3 no $$$. Responder EXATAMENTE: "Manhã ou '
+                            'tarde? 😊" NAO pergunte o dia de novo.] ' + (base.get("texto_ia") or "")
+                        )
+                    else:
+                        base["coleta_periodo"] = per_grade_da
+                        base["texto_ia"] = (
+                            f'[DATA OK: {dt_str_da} = {_FULL_DA[ab_da]}, {base["coleta_medico"]} atende so '
+                            f'{per_grade_da}. Setar dt="{dt_str_da}", ds="{ab_da}", per="{per_grade_da}", modo=3 '
+                            'no $$$. Responder EXATAMENTE: "A consulta será Particular ou Convênio? 😊" NAO '
+                            'pergunte dia nem periodo.] ' + (base.get("texto_ia") or "")
+                        )
+
+            if dados_tratada:
+                pass
+            elif eh_qualquer_dsg:
+                rota_agente = 4
+                base["_sub_rota_agenda"] = "navegacao"
+                intencao_rapida = "agenda"
+                base["coleta_data"] = ""
+                base["coleta_dia_semana"] = ""
+                base["coleta_periodo"] = ""
+                clear_pm_dsg = base.get("_clear_pm") or {}
+                clear_pm_dsg.update({"dt": 1, "ds": 1, "per": 1})
+                base["_clear_pm"] = clear_pm_dsg
+                dt_hoje_phm = (
+                    base["hoje"] if re.match(r"^\d{4}-\d{2}-\d{2}$", base.get("hoje") or "")
+                    else _hoje_sp().strftime("%Y-%m-%d")
+                )
+                base["texto_ia"] = (
+                    f'[PROXIMO_HORARIO_MEDICO: paciente quer o PRIMEIRO horario disponivel com '
+                    f'{base["coleta_medico"]} — sem preferencia de dia nem de periodo. Chame buscar_agenda '
+                    f'AGORA com unidade="{base.get("coleta_unidade") or ""}", medico="{base["coleta_medico"]}", '
+                    f'data="{dt_hoje_phm}", dia_semana="" e periodo="" e mostre os horarios que a TOOL retornar. '
+                    'Setar ds="", dt="", per="" no $$$. ⛔ NAO pergunte dia. ⛔ NAO pergunte periodo. ⛔ NUNCA '
+                    'invente horarios.] ' + (base.get("texto_ia") or "")
+                )
+            else:
+                base["texto_ia"] = (
+                    f'[DIA_SEMANA_INVALIDO: paciente respondeu "{texto_usuario}" mas esperamos dia da semana.'
+                    + (f' {base["coleta_medico"]} atende: {dias_med_dsg}.' if dias_med_dsg else "")
+                    + f' Perguntar EXATAMENTE: "{base.get("coleta_medico") or "O médico"} atende '
+                    f'{dias_med_dsg or "[dias]"}. Qual dia prefere? 😊" NAO mude med/unid/modo/ds no $$$] '
+                    + (base.get("texto_ia") or "")
+                )
+
+    # FIX_MESMO_MEDICO: "o mesmo medico"/"o de sempre"/"da ultima vez" na etapa de escolher medico
+    if (
+        rota_agente in (2, 3) and _int(base.get("coleta_modo")) == 0 and base.get("coleta_unidade")
+        and _texto_ia_livre(base)
+    ):
+        txt_mm = _norm(texto_usuario)
+        eh_mesmo_medico = bool(re.search(
+            r"mesmo (medico|dr|doutor|doutora|profissional)|de sempre|da ultima (vez|consulta)|o de antes|"
+            r"o mesmo de antes|mesmo de sempre|quero o mesmo|igual da ultima", txt_mm,
+        ))
+        if eh_mesmo_medico:
+            ultimo_med_mm = (base.get("_ultimo_medico_global") or "").strip()
+            mk_mm = _match_medico_key(ultimo_med_mm, _FULL_MD.keys()) if ultimo_med_mm else ""
+            if mk_mm and _FULL_MD.get(mk_mm):
+                base["coleta_medico"] = _FULL_MD[mk_mm]
+                base["coleta_modo"] = 3
+                base["texto_ia"] = (
+                    f'[MESMO MEDICO: paciente quer o mesmo medico do atendimento anterior ({_FULL_MD[mk_mm]}). '
+                    f'Setar med="{_FULL_MD[mk_mm]}", modo=3 no $$$. Continue o fluxo normalmente a partir daqui '
+                    '(dia/periodo). NAO pergunte de novo qual medico.] ' + texto_usuario
+                )
+            elif ultimo_med_mm:
+                base["texto_ia"] = (
+                    f'[MESMO MEDICO NAO RECONHECIDO: paciente quer "{texto_usuario}" mas o medico anterior '
+                    f'salvo ("{ultimo_med_mm}") nao bate com nenhum da lista atual. Responder EXATAMENTE: "Não '
+                    'localizei esse médico na nossa lista atual 😅 Com qual você prefere?\\nDigite o número ou '
+                    'escreva:\\n\\n1️⃣ Primeiro horário disponível\\n2️⃣ Escolher especialista\\n3️⃣ Já tenho '
+                    'médico de preferência" NAO mude modo/med no $$$.] ' + texto_usuario
+                )
+            else:
+                base["texto_ia"] = (
+                    '[SEM MEDICO ANTERIOR: paciente pediu o mesmo medico de antes, mas nao ha atendimento '
+                    'anterior registrado no sistema. Responder EXATAMENTE: "Não encontrei um atendimento '
+                    'anterior seu em nosso sistema 😅 Pode escolher:\\nDigite o número ou escreva:\\n\\n1️⃣ '
+                    'Primeiro horário disponível\\n2️⃣ Escolher especialista\\n3️⃣ Já tenho médico de '
+                    'preferência" NAO mude modo/med no $$$.] ' + texto_usuario
+                )
+
+    # FIX_MENU_P3_INVALIDO: modo=0 + texto nao e 1/2/3 nem nome de medico -> repetir menu P3
+    if (
+        rota_agente in (2, 3) and _int(base.get("coleta_modo")) == 0 and base.get("coleta_unidade")
+        and _texto_ia_livre(base)
+    ):
+        txt_p3 = _norm(texto_usuario)
+        bare_menu_p3 = bool(re.fullmatch(r"[123]", txt_p3))
+        eh_nome_med_p3 = any(m in txt_p3 for m in _NOMES_DOCS_NMO)
+        if not bare_menu_p3 and not eh_nome_med_p3:
+            base["texto_ia"] = (
+                f'[MENU_P3_INVALIDO: paciente respondeu "{texto_usuario}" mas esperamos 1/2/3 ou nome do '
+                'médico. Responder EXATAMENTE: "Com qual médico você prefere?\\nDigite o número ou escreva:\\n\\n'
+                '1️⃣ Primeiro horário disponível\\n2️⃣ Escolher especialista\\n3️⃣ Já tenho médico de '
+                'preferência" NAO mude modo/med/unid/d/c/n no $$$] ' + (base.get("texto_ia") or "")
+            )
+
+    # FIX_CONVENIO_GENERICO: "convenio"/"plano" SEM nome especifico -> exibir lista de convenios
+    if (
+        rota_agente in (2, 3) and base.get("coleta_unidade") and base.get("coleta_medico")
+        and (not base.get("coleta_convenio") or base.get("coleta_convenio") == "RESET_CONV")
+    ):
+        txt_cg = _norm(texto_usuario)
+        tem_nome_conv = bool(re.search(r"bradesco|brad|omint|porto|itau|particular", txt_cg))
+        eh_conv_generico = not tem_nome_conv and bool(re.match(
+            r"^(convenio|plano|por convenio|tenho convenio|pelo convenio|e convenio|sera convenio|de convenio|"
+            r"tenho plano)\b", txt_cg,
+        ))
+        if eh_conv_generico:
+            base["texto_ia"] = (
+                '[CONVENIO GENERICO: paciente disse "convenio" sem citar o plano. ⛔ NAO recuse. ⛔ NAO ofereca '
+                'particular. Responder EXATAMENTE: "A Oto-SP atende os seguintes convenios:\n➡️ Itau\n➡️ '
+                'Omint\n➡️ Porto Seguro\n➡️ Bradesco — apenas na Unidade Vila Olimpia\n\nQual o seu? 😊" NAO '
+                'mude conv/med/unid/dt/per no $$$.] ' + (base.get("texto_ia") or texto_usuario)
+            )
+
+    return ResultadoParte10(base=base, intencao_rapida=intencao_rapida, rota_agente=rota_agente)
