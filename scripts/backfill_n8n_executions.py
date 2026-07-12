@@ -21,10 +21,10 @@ from datetime import datetime, timezone
 
 import httpx
 import psycopg
-from psycopg.types.json import Jsonb
 
 sys.path.insert(0, __file__.rsplit("scripts", 1)[0])
 from app.config import PG_DSN  # noqa: E402
+from app.db import gravar_turno  # noqa: E402
 
 import os
 
@@ -141,27 +141,10 @@ def _extrair_texto_usuario(node_json) -> str | None:
     return None
 
 
-def gravar(conn: psycopg.Connection, row: dict) -> bool:
-    """Retorna True se inseriu (False se já existia — idempotência)."""
-    params = dict(row)
-    for campo in ("extrair_rota", "extrair_intencao_final", "state_validator", "raw_nodes"):
-        params[campo] = Jsonb(params[campo]) if params[campo] is not None else None
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO conversas_log
-              (execution_id, workflow_id, status, mode, started_at, stopped_at,
-               telefone, texto_usuario, extrair_rota, extrair_intencao_final,
-               state_validator, mensagem_enviada, raw_nodes)
-            VALUES (%(execution_id)s, %(workflow_id)s, %(status)s, %(mode)s,
-                    %(started_at)s, %(stopped_at)s, %(telefone)s, %(texto_usuario)s,
-                    %(extrair_rota)s, %(extrair_intencao_final)s, %(state_validator)s,
-                    %(mensagem_enviada)s, %(raw_nodes)s)
-            ON CONFLICT (execution_id) DO NOTHING;
-            """,
-            params,
-        )
-        return cur.rowcount > 0
+# gravar() foi absorvido por app.db.gravar_turno — mesma função usada pelo endpoint
+# POST /log-turno, pra não duplicar a lista de colunas em dois lugares (foi exatamente essa
+# duplicação que causou o bug do "query parameter missing: raw_nodes" no live logging).
+gravar = gravar_turno
 
 
 def main():
