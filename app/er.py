@@ -4,10 +4,14 @@ snapshot 12/07/2026). Fase 1 do plano de migração (ver
 C:\\Users\\lucas\\.claude\\plans\\unified-coalescing-puppy.md).
 
 ER é grande demais pra portar de uma vez (250+ guards sequenciais, ~135 blocos FIX_*) — este
-arquivo cobre a PARTE 1: setup inicial + guards determinísticos de transferência humana
-(documento/telemedicina/reembolso/remarcação múltipla/convênio recusado/lista de espera/
-encaixe/Stephanie teleconsulta) + proteções de contexto de sessão (linhas 1-736 do JS fonte).
-O resto (extração multi-dados, guards de agenda/coleta detalhados, empacotamento final) fica
+arquivo cobre, em fatias sucessivas:
+  PARTE 1 (linhas 1-736): setup inicial + guards determinísticos de transferência humana
+    (documento/telemedicina/reembolso/remarcação múltipla/convênio recusado/lista de espera/
+    encaixe/Stephanie teleconsulta) + proteções de contexto de sessão.
+  PARTE 2 (linhas 737-1090): coleta de identidade — extração multi-dados (nome/CPF/nascimento/
+    email numa mensagem só), lookup de paciente por nome, identidade residual, execução sem
+    nascimento, terceiro pede nascimento, CPF/nascimento trocados.
+O resto (convênios específicos, guards de agenda/coleta detalhados, empacotamento final) fica
 pra próximas fatias — cada uma seguindo o mesmo padrão de port fiel + testes.
 
 Como em app/eif1.py: PORT, não reescrita — ordem dos blocos e regras exatas espelham o JS de
@@ -28,7 +32,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from app.text_utils import _norm, _strip_accents
+from app.text_utils import _cpf_digitos_validos, _norm, _strip_accents
 
 SAUDACOES_PURAS = {
     "oi", "ola", "bom dia", "boa tarde", "boa noite",
@@ -814,3 +818,408 @@ def _to_int_or_none(s: str):
 def _search_index(pattern: str, s: str) -> int:
     m = re.search(pattern, s)
     return m.start() if m else -1
+
+
+# ============================================================================
+# PARTE 2 (linhas 737-1090 do JS): coleta de identidade
+# ============================================================================
+
+_KEYWORDS_NOME_MD_RE = re.compile(
+    r"\b(meu nome e|meu nome é|me chamo|sou o|sou a|sou|nome completo|nome|cpf|data de nascimento|"
+    r"nascimento|nascido em|nasci em|nascida em|email|e-mail|segue|seguem|meus dados|dados)\b",
+    re.IGNORECASE,
+)
+_RUIM_NOME_MD_RE = re.compile(
+    r"\b(nao|não|sim|tenho|sem|quero|queria|gostaria|agendar|marcar|remarcar|consulta|cancelar|pular|"
+    r"opcional|dia|tarde|noite|manha|manhã|ola|olá|oi|bom|boa|obrigado|obrigada|valeu|ok|por favor|pfv|favor)\b",
+    re.IGNORECASE,
+)
+_TOKEN_NOME_MD_RE = re.compile(r"^[a-zà-ÿ]+$", re.IGNORECASE)
+_EMAIL_RE = re.compile(r"[\w.+\-]+@[\w\-]+\.[\w.\-]{2,}")
+
+_TERCEIRO_PURO_RE = re.compile(
+    r"^\W*(e |eh |vai ser |sera )?((para|pra|pro)\s+)?(o |a )?(meu |minha )?(outra pessoa|um terceiro|terceiro|"
+    r"filho|filha|esposo|esposa|marido|mae|pai|irmao|irma|neto|neta|sogro|sogra|tio|tia|primo|prima|genro|nora)\W*$"
+)
+
+
+def _parse_data_nascimento(txt: str):
+    """dd/mm/aaaa (com - . espaco) ou ddmmaaaa colado — data real, nao-futura, <=120 anos.
+    Retorna (data_formatada, texto_casado) ou (None, None)."""
+    m = re.search(r"\b(\d{1,2})[/\-.\s]+(\d{1,2})[/\-.\s]+(\d{2,4})\b", txt)
+    if not m:
+        m = re.search(r"\b(\d{2})(\d{2})(\d{4})\b", txt)
+    if not m:
+        return None, None
+    dd, mm, yy = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    if len(m.group(3)) == 2:
+        yy += 1900 if yy > 26 else 2000
+    try:
+        dt = datetime(yy, mm, dd)
+    except ValueError:
+        return None, None
+    hoje = datetime.now()
+    if dt < hoje and yy >= hoje.year - 120:
+        return f"{dd:02d}/{mm:02d}/{yy}", m.group(0)
+    return None, None
+
+
+def _extrair_cpf_md(txt: str, telefone: str):
+    """Retorna (cpf_valido, texto_casado, cpf_invalido_encontrado)."""
+    tel_digits = re.sub(r"\D", "", telefone or "")
+    cands = re.findall(r"[\d.\-]{11,14}", txt) + re.findall(r"\d[\d.\-\s]{9,17}\d", txt)
+    cpf_invalido = ""
+    for cand in cands:
+        dig = re.sub(r"\D", "", cand)
+        if len(dig) != 11:
+            continue
+        if re.fullmatch(r"(\d)\1{10}", dig):
+            continue
+        if tel_digits and tel_digits.endswith(dig[-8:]):
+            continue
+        if _cpf_digitos_validos(dig):
+            return dig, cand, ""
+        cpf_invalido = dig
+    return "", "", cpf_invalido
+
+
+def _extrair_nome_md(txt: str) -> str | None:
+    limpo = _KEYWORDS_NOME_MD_RE.sub(" ", txt)
+    limpo = re.sub(r"[\d/\-.:,;()*\"']+", " ", limpo)
+    limpo = re.sub(r"\s+", " ", limpo).strip()
+    if _RUIM_NOME_MD_RE.search(limpo):
+        return None
+    palavras = [w for w in limpo.split(" ") if _TOKEN_NOME_MD_RE.match(w)]
+    if 2 <= len(palavras) <= 8 and sum(1 for w in palavras if len(w) >= 2) >= 2:
+        return " ".join(palavras).upper()
+    return None
+
+
+@dataclass
+class ResultadoIdentidade:
+    base: dict
+    intencao_rapida: str
+    rota_agente: int
+    motivo_humano: str | None = None
+
+
+def processar_identidade(
+    base: dict,
+    texto_usuario: str,
+    intencao_rapida: str,
+    rota_agente: int,
+    ia_output: dict,
+    eh_cancel_real: bool,
+    eh_mensagem_informativa: bool,
+    motivo_humano: str | None = None,
+) -> ResultadoIdentidade:
+    txt_norm = _norm(texto_usuario)
+
+    # FIX_MULTI_DADOS (+ FIX_CPF_INVALIDO_AVISO): nome, CPF, nascimento e email numa mensagem só.
+    pacs_md = base.get("pacientes") or []
+    eh_0pac_md = len(pacs_md) == 0
+    eh_terc_md = base.get("coleta_terceiro") == "true"
+    cpf_falta_md = not _cpf_digitos_validos(re.sub(r"\D", "", base.get("cpf_dependente") or ""))
+    incompleto_md = (
+        not (base.get("nome_dependente") or "").strip()
+        or cpf_falta_md
+        or not (base.get("nascimento_dependente") or "").strip()
+    )
+    if (eh_0pac_md or eh_terc_md) and incompleto_md and not eh_cancel_real and not eh_mensagem_informativa:
+        det_md: dict = {}
+        txt_md = texto_usuario
+        cpf_invalido_md = ""
+        if cpf_falta_md:
+            cpf_ok, cpf_matched, cpf_invalido_md = _extrair_cpf_md(txt_md, base.get("telefone", ""))
+            if cpf_ok:
+                det_md["c"] = cpf_ok
+                txt_md = txt_md.replace(cpf_matched, " ")
+        if not (base.get("nascimento_dependente") or "").strip():
+            nasc, matched = _parse_data_nascimento(txt_md)
+            if nasc:
+                det_md["n"] = nasc
+                txt_md = txt_md.replace(matched, " ")
+        if not (base.get("coleta_email") or "").strip():
+            m_email = _EMAIL_RE.search(txt_md)
+            if m_email:
+                det_md["email"] = m_email.group(0)
+                txt_md = txt_md.replace(m_email.group(0), " ")
+        if not (base.get("nome_dependente") or "").strip() and (det_md.get("c") or det_md.get("n") or cpf_invalido_md):
+            nome_md = _extrair_nome_md(txt_md)
+            if nome_md:
+                det_md["d"] = nome_md
+
+        sess_coleta_md = base.get("sessao_intencao") == "coleta" or _int(base.get("sessao_rota")) in (2, 3)
+        if (det_md.get("c") or det_md.get("n") or det_md.get("d") or det_md.get("email") or cpf_invalido_md) \
+                and (sess_coleta_md or det_md.get("c")):
+            if det_md.get("d"):
+                base["nome_dependente"] = det_md["d"]
+            if det_md.get("c"):
+                base["cpf_dependente"] = det_md["c"]
+            if det_md.get("n"):
+                base["nascimento_dependente"] = det_md["n"]
+            if det_md.get("email"):
+                base["coleta_email"] = det_md["email"]
+            base["_cad_det"] = det_md
+            rota_agente = 3 if eh_terc_md else 2
+            if intencao_rapida == "triagem" or not intencao_rapida:
+                intencao_rapida = "coleta"
+            if _texto_ia_livre(base):
+                falta_md = []
+                if not (base.get("nome_dependente") or "").strip():
+                    falta_md.append("nome completo")
+                if not _cpf_digitos_validos(re.sub(r"\D", "", base.get("cpf_dependente") or "")):
+                    falta_md.append("CPF")
+                if not (base.get("nascimento_dependente") or "").strip():
+                    falta_md.append("data de nascimento")
+                rec_md = ", ".join(filter(None, [
+                    det_md.get("d") and "nome", det_md.get("c") and "CPF",
+                    det_md.get("n") and "nascimento", det_md.get("email") and "email",
+                ]))
+                ddl_md = (
+                    (f' d="{det_md["d"]}"' if det_md.get("d") else "")
+                    + (f' c="{det_md["c"]}"' if det_md.get("c") else "")
+                    + (f' n="{det_md["n"]}"' if det_md.get("n") else "")
+                    + (f' email="{det_md["email"]}"' if det_md.get("email") else "")
+                )
+                if falta_md and cpf_invalido_md:
+                    cf_cpf_md = _int(base.get("coleta_conv_fail"))
+                    if cf_cpf_md >= 1:
+                        ia_output["bypass_agente_humano"] = True
+                        intencao_rapida = "humano"
+                        motivo_humano = f"CPF invalido 2x na coleta ({cpf_invalido_md})"
+                        base["motivo_humano"] = motivo_humano
+                        base["texto_ia"] = (
+                            '[CPF INVALIDO 2X → ATENDENTE: segunda tentativa de CPF que nao confere nos digitos '
+                            'verificadores. Responder EXATAMENTE: "O CPF não conferiu de novo 😔 Vou te passar para '
+                            'um atendente para te ajudar com o cadastro!" e emitir i="humano", motivo="CPF invalido '
+                            '2x".] ' + texto_usuario
+                        )
+                    else:
+                        base["texto_ia"] = (
+                            f'[CPF INVALIDO: "{cpf_invalido_md}" reprova nos digitos verificadores (typo provavel '
+                            '— o TiSaude recusaria).'
+                            + (f' Demais dados ({rec_md}) JA SALVOS no sistema — copie EXATAMENTE no $$$:{ddl_md}.' if rec_md else '')
+                            + ' ⛔ NAO salve esse CPF — deixe c="" no $$$. Setar cf=1 no $$$. Responder EXATAMENTE: '
+                              '"Hmm, o CPF não conferiu 🤔 Pode ver se digitou os 11 números certinho e me enviar de '
+                              'novo? 😊"] ' + texto_usuario
+                        )
+                elif falta_md:
+                    base["texto_ia"] = (
+                        f'[DADOS CADASTRO DETECTADOS ({rec_md}) — JA SALVOS no sistema. Copie EXATAMENTE no '
+                        f'$$$:{ddl_md}. ⛔ NAO repergunte o que ja veio. Responder EXATAMENTE: "Obrigado! Só faltou: '
+                        + " e ".join(falta_md) + '. Pode me enviar? 😊"] ' + texto_usuario
+                    )
+                else:
+                    d_full_md = (base.get("nome_dependente") or "").strip()
+                    c_full_md = (base.get("cpf_dependente") or "").strip()
+                    n_full_md = (base.get("nascimento_dependente") or "").strip()
+                    prox_md = (
+                        'Responder EXATAMENTE: "Perfeito, dados anotados! 😊\nTemos dois endereços de atendimento, '
+                        'qual a melhor unidade para você?\nDigite o número correspondente:\n1️⃣ Vila Olímpia\n'
+                        '2️⃣ Tatuapé"'
+                    ) if not (base.get("coleta_unidade") or "").strip() else (
+                        'Identidade completa — va ao proximo passo da coleta pendente. ⛔ NAO repergunte '
+                        'nome/CPF/nascimento.'
+                    )
+                    base["texto_ia"] = (
+                        f'[DADOS CADASTRO COMPLETOS — JA SALVOS no sistema. Copie EXATAMENTE no $$$: '
+                        f'd="{d_full_md}" c="{c_full_md}" n="{n_full_md}"'
+                        + (f' email="{det_md["email"]}"' if det_md.get("email") else "")
+                        + (' t=true' if eh_terc_md else "")
+                        + f'. ⛔ NAO pergunte email. {prox_md}] ' + texto_usuario
+                    )
+
+    # FIX_PEDIR_IDENTIDADE_COMPLETA (58070)
+    txt_pi = txt_norm
+    pacs_pi = base.get("pacientes") or []
+    sess_coleta_pi = base.get("sessao_intencao") == "coleta" or _int(base.get("sessao_rota")) in (2, 3) or rota_agente in (2, 3)
+    ident_vazia_pi = (
+        not (base.get("nome_dependente") or "").strip()
+        and not (base.get("cpf_dependente") or "").strip()
+        and not (base.get("nascimento_dependente") or "").strip()
+    )
+    eh_para_mim_pi = bool(re.search(r"\b(para|pra|p)\s+mim\b", txt_pi)) and len(pacs_pi) == 0
+    eh_terceiro_pi = bool(_TERCEIRO_PURO_RE.match(txt_pi))
+    if (((eh_para_mim_pi and ident_vazia_pi) or eh_terceiro_pi) and sess_coleta_pi
+            and not eh_cancel_real and not eh_mensagem_informativa
+            and not ia_output.get("bypass_agente_humano") and _texto_ia_livre(base)):
+        rota_agente = 3 if eh_terceiro_pi else 2
+        if intencao_rapida == "triagem" or not intencao_rapida:
+            intencao_rapida = "coleta"
+        if eh_terceiro_pi:
+            base["nome_dependente"] = ""
+            base["cpf_dependente"] = ""
+            base["nascimento_dependente"] = ""
+            base["coleta_terceiro"] = "true"
+            base["_clear_pm"] = {**(base.get("_clear_pm") or {}), "d": 1, "c": 1, "n": 1}
+            base["texto_ia"] = (
+                '[COLETA IDENTIDADE TERCEIRO: consulta e para outra pessoa. Copie EXATAMENTE no $$$: t=true, d="", '
+                'c="", n="" (dados anteriores NAO valem para outra pessoa). Responder EXATAMENTE: "Certo! Para o '
+                'cadastro de quem vai se consultar, preciso de:\n👤 Nome completo\n🔢 CPF\n🎂 Data de nascimento\n'
+                'Pode me enviar? 😊" ⛔ Os 3 itens sao OBRIGATORIOS na resposta — NUNCA omita o nome completo.] ' + texto_usuario
+            )
+        else:
+            base["texto_ia"] = (
+                '[COLETA IDENTIDADE: paciente confirmou que a consulta e para ele mesmo. Setar t=false no $$$ '
+                '(mantenha unid/med/dt que vierem na msg). Responder EXATAMENTE: "Perfeito! Para eu localizar ou '
+                'criar seu cadastro aqui na clínica, preciso de três dadinhos 😊\n👤 Nome completo\n🔢 CPF\n'
+                '🎂 Data de nascimento\nPode me enviar?" ⛔ Os 3 itens sao OBRIGATORIOS na resposta — NUNCA omita o '
+                'nome completo. ⛔ NAO pergunte unidade agora.] ' + texto_usuario
+            )
+
+    # FIX_58842: resposta é nome de paciente cadastrado (lookup determinístico)
+    txt_qc = re.sub(r"\s+", " ", re.sub(r"[.,!?;:]+", " ", txt_norm)).strip()
+    pacs_qc = base.get("pacientes") or []
+    sess_coleta_qc = base.get("sessao_intencao") == "coleta" or _int(base.get("sessao_rota")) in (2, 3) or rota_agente in (2, 3)
+    quem_vazio_qc = not (base.get("nome_dependente") or "").strip() and not (base.get("cpf_dependente") or "").strip()
+    if (sess_coleta_qc and quem_vazio_qc and txt_qc and pacs_qc
+            and not ia_output.get("bypass_agente_humano") and _texto_ia_livre(base)):
+        txt_qc_sp = re.sub(r"^(?:a consulta )?(?:e |eh |sera |vai ser )?(?:para|pra|pro)\s+(?:a |o )?", "", txt_qc).strip()
+
+        def _match_qc(p):
+            pn = _norm(p.get("nome"))
+            if not pn:
+                return False
+            pn_toks = pn.split(" ")
+            if txt_qc == pn or txt_qc == pn_toks[0] or txt_qc_sp == pn or txt_qc_sp == pn_toks[0]:
+                return True
+            for cand in (txt_qc, txt_qc_sp):
+                m_toks = [t for t in cand.split(" ") if len(t) >= 2]
+                if len(m_toks) >= 2 and m_toks[0] == pn_toks[0] and all(t in pn_toks for t in m_toks):
+                    return True
+            return False
+
+        matches_qc = [p for p in pacs_qc if _match_qc(p)]
+        if len(matches_qc) == 1:
+            p_qc = matches_qc[0]
+            base["nome_dependente"] = p_qc.get("nome") or ""
+            base["cpf_dependente"] = str(p_qc.get("cpf") or "")
+            base["nascimento_dependente"] = p_qc.get("nascimento") or ""
+            base["coleta_id_tisaude"] = str(p_qc.get("id_tisaude") or "")
+            base["coleta_terceiro"] = ""
+            rota_agente = 2
+            intencao_rapida = "coleta"
+            dd_qc = (
+                f't=false, d="{base["nome_dependente"]}", c="{base["cpf_dependente"]}", '
+                f'n="{base["nascimento_dependente"]}", id="{base["coleta_id_tisaude"]}"'
+            )
+            nome_qc = p_qc.get("nome") or ""
+            if not base["nascimento_dependente"]:
+                base["texto_ia"] = (
+                    f'[QUEM CONFIRMADO LOOKUP: consulta para {nome_qc} (cadastrado). Copie EXATAMENTE no $$$: '
+                    f'{dd_qc}. Responder EXATAMENTE: "Perfeito! Consulta para {nome_qc} 😊 Só falta a data de '
+                    'nascimento — pode me enviar? (dia/mês/ano)" ⛔ NAO peça CPF.] ' + texto_usuario
+                )
+            elif not base.get("coleta_unidade"):
+                base["texto_ia"] = (
+                    f'[QUEM CONFIRMADO LOOKUP: consulta para {nome_qc} (cadastrado). Copie EXATAMENTE no $$$: '
+                    f'{dd_qc}. Responder EXATAMENTE: "Perfeito! Consulta para {nome_qc} 😊\nTemos dois endereços de '
+                    'atendimento, qual a melhor unidade para você?\nDigite o número correspondente:\n\n'
+                    '1️⃣ Vila Olímpia\n2️⃣ Tatuapé" ⛔ NAO peça CPF nem nascimento.] ' + texto_usuario
+                )
+            else:
+                base["texto_ia"] = (
+                    f'[QUEM CONFIRMADO LOOKUP: consulta para {nome_qc} (cadastrado, unidade ja salva). Copie '
+                    f'EXATAMENTE no $$$: {dd_qc}. Responder EXATAMENTE: "Perfeito! Consulta para {nome_qc} 😊\n'
+                    'Com qual médico você prefere?\nDigite o número ou escreva:\n\n1️⃣ Primeiro horário disponível\n'
+                    '2️⃣ Escolher especialista\n3️⃣ Já tenho médico de preferência" ⛔ NAO peça CPF nem nascimento.] '
+                    + texto_usuario
+                )
+
+    # FIX_IDENTIDADE_RESIDUAL (58245, loop "para mim")
+    txt_ir = txt_norm
+    pacs_ir = base.get("pacientes") or []
+    d_ir = (base.get("nome_dependente") or "").strip()
+    c_ir = re.sub(r"\D", "", base.get("cpf_dependente") or "")
+    n_ir = (base.get("nascimento_dependente") or "").strip()
+    dv_ok_ir = _cpf_digitos_validos(c_ir)
+    sess_ir = base.get("sessao_intencao") == "coleta" or _int(base.get("sessao_rota")) in (2, 3) or rota_agente in (2, 3)
+    if (re.search(r"\b(para|pra|p)\s+mim\b", txt_ir) and len(pacs_ir) == 0
+            and d_ir and dv_ok_ir and n_ir and base.get("coleta_terceiro") != "true"
+            and sess_ir and not eh_cancel_real and not eh_mensagem_informativa
+            and not ia_output.get("bypass_agente_humano") and _texto_ia_livre(base)):
+        rota_agente = 2
+        if intencao_rapida == "triagem" or not intencao_rapida:
+            intencao_rapida = "coleta"
+        prox_ir = (
+            f'Responder EXATAMENTE: "Perfeito! Consulta para {d_ir} 😊\nTemos dois endereços de atendimento, qual a '
+            'melhor unidade para você?\nDigite o número correspondente:\n1️⃣ Vila Olímpia\n2️⃣ Tatuapé"'
+        ) if not (base.get("coleta_unidade") or "").strip() else (
+            f'Confirme brevemente ("Perfeito! Consulta para {d_ir} 😊") e siga o proximo passo da coleta pendente.'
+        )
+        base["texto_ia"] = (
+            f'[QUEM CONFIRMADO RESIDUAL: este WhatsApp ja tem cadastro coletado — d="{d_ir}" c="{c_ir}" n="{n_ir}". '
+            f'Paciente disse "para mim" → identidade RESOLVIDA. Copie EXATAMENTE no $$$: t=false, d="{d_ir}", '
+            f'c="{c_ir}", n="{n_ir}". {prox_ir} ⛔ NAO peça nome/CPF/nascimento de novo. ⛔ NAO pergunte "para você ou '
+            'outra pessoa".] ' + texto_usuario
+        )
+
+    # FIX_EXECUCAO_SEM_NASC (58382)
+    eh_exec_nb = base.get("sessao_intencao") == "execucao" or intencao_rapida == "execucao"
+    pacs_nb = base.get("pacientes") or []
+    if (eh_exec_nb and pacs_nb and base.get("coleta_terceiro") != "true"
+            and not (base.get("nascimento_dependente") or "").strip()
+            and not ia_output.get("bypass_agente_humano") and _texto_ia_livre(base)):
+        nasc_nb, _ = _parse_data_nascimento(texto_usuario)
+        if nasc_nb:
+            base["nascimento_dependente"] = nasc_nb
+            base["_cad_det"] = {**(base.get("_cad_det") or {}), "n": nasc_nb}
+            base["texto_ia"] = (
+                f'[NASC RECEBIDO: data de nascimento {nasc_nb} JA SALVA no sistema. Copie n="{nasc_nb}" no $$$ e '
+                'PROSSIGA a criacao: chame criar_consulta AGORA com todos os dados salvos (unid/med/dt/h/conv). '
+                '⛔ NAO repergunte nada.] ' + texto_usuario
+            )
+        else:
+            m_mail_nb = _EMAIL_RE.search(texto_usuario)
+            base["texto_ia"] = (
+                '[FALTA NASCIMENTO P/ CRIAR: o cadastro deste paciente NAO tem data de nascimento e criar_consulta '
+                'FALHA sem ela. '
+                + (f'A msg trouxe o email {m_mail_nb.group(0)} — salve email="{m_mail_nb.group(0)}" no $$$. ' if m_mail_nb else '')
+                + '⛔ NAO chame criar_consulta ainda. Responder EXATAMENTE: "Só falta sua data de nascimento para '
+                  'concluir o agendamento 😊 Pode me enviar? (dia/mês/ano)"] ' + texto_usuario
+            )
+
+    # FIX_TERCEIRO_PEDIR_NASCIMENTO (52946)
+    if (base.get("coleta_terceiro") == "true" and (base.get("nome_dependente") or "").strip()
+            and not (base.get("nascimento_dependente") or "").strip() and not eh_mensagem_informativa):
+        digitos_cpf = re.sub(r"\D", "", texto_usuario or "")
+        cpf_vazio = not (base.get("cpf_dependente") or "").strip()
+        if cpf_vazio and len(digitos_cpf) == 11:
+            nome_tpn = (base.get("nome_dependente") or "o paciente").strip()
+            base["cpf_dependente"] = digitos_cpf
+            rota_agente = 3
+            if intencao_rapida == "triagem":
+                intencao_rapida = "coleta"
+            base["texto_ia"] = (
+                f'[COLETA TERCEIRO - PEDIR NASCIMENTO: paciente informou o CPF de {nome_tpn}. Salve '
+                f'c="{digitos_cpf}", d="{nome_tpn}", t=true no $$$. AGORA pergunte EXATAMENTE: "Qual a data de '
+                f'nascimento de {nome_tpn}? (dia/mês/ano) 😊". ⛔ NAO pergunte unidade. ⛔ NAO avance para P2 sem o '
+                'nascimento.]'
+            )
+
+    # FIX_CPF_NASCIMENTO_TROCADOS
+    if rota_agente in (2, 3) and (base.get("nome_dependente") or "").strip() and _texto_ia_livre(base):
+        msg_cn = texto_usuario.strip()
+        dig_cn = re.sub(r"\D", "", msg_cn)
+        parece_cpf_cn = bool(re.fullmatch(r"\d{11}", msg_cn))
+        parece_data_cn = len(dig_cn) > 0 and len(dig_cn) != 11 and (
+            bool(re.search(r"\d{1,2}\D{1,3}\d{1,2}\D{1,3}\d{2,4}", msg_cn)) or len(dig_cn) == 8
+        )
+        if not (base.get("cpf_dependente") or "").strip() and not (base.get("nascimento_dependente") or "").strip() and parece_data_cn:
+            base["nascimento_dependente"] = msg_cn
+            base["texto_ia"] = (
+                f'[CPF/NASCIMENTO TROCADOS: isso parece a data de nascimento, nao o CPF. Setar n="{msg_cn}", c="" '
+                'no $$$. Responder EXATAMENTE: "Ah, acho que essa é sua data de nascimento! Já anotei aqui. 😊 '
+                'Agora me confirma o seu CPF, por favor?" NAO peça nascimento de novo.] ' + texto_usuario
+            )
+        elif ((base.get("cpf_dependente") or "").strip() and not (base.get("nascimento_dependente") or "").strip()
+              and parece_cpf_cn and len(re.sub(r"\D", "", base.get("cpf_dependente") or "")) != 11):
+            base["cpf_dependente"] = dig_cn
+            base["texto_ia"] = (
+                f'[CPF/NASCIMENTO TROCADOS: isso parece o CPF, nao a data de nascimento. Setar c="{dig_cn}" no $$$. '
+                'Responder EXATAMENTE: "Ah, acho que esse é o seu CPF! Já anotei aqui. 😊 Agora me informa sua data '
+                'de nascimento, por favor?" NAO peça CPF de novo.] ' + texto_usuario
+            )
+
+    return ResultadoIdentidade(base=base, intencao_rapida=intencao_rapida, rota_agente=rota_agente, motivo_humano=motivo_humano)

@@ -21,9 +21,9 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from app.text_utils import _norm, _strip_accents
+from app.text_utils import _cpf_digitos_validos, _norm, _strip_accents
 
-__all__ = ["_norm", "_strip_accents"]  # re-exportados, usados por tests/test_eif1.py
+__all__ = ["_norm", "_strip_accents", "_cpf_digitos_validos"]  # re-exportados, usados por tests/test_eif1.py
 
 
 # FIX_DT_DS_MISMATCH / FIX_CLEAR_FIELDS usam a convenção JS de getDay(): domingo=0.
@@ -63,20 +63,6 @@ _MED_CANON = [
 ]
 
 _RE_QUOTES = [('"', '"'), ("“", "”")]
-
-
-def _cpf_digitos_validos(digs: str) -> bool:
-    if not re.fullmatch(r"\d{11}", digs) or re.fullmatch(r"(\d)\1{10}", digs):
-        return False
-    s1 = sum(int(digs[i]) * (10 - i) for i in range(9))
-    d1 = (s1 * 10) % 11
-    if d1 == 10:
-        d1 = 0
-    s2 = sum(int(digs[i]) * (11 - i) for i in range(10))
-    d2 = (s2 * 10) % 11
-    if d2 == 10:
-        d2 = 0
-    return d1 == int(digs[9]) and d2 == int(digs[10])
 
 
 def _hoje_sp() -> datetime:
