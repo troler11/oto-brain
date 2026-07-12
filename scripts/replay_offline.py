@@ -7,9 +7,10 @@ sem esperar tráfego novo".
 Reconstrói, por turno, exatamente o que os nós originais receberam:
   ER   <- Montar Contexto (base), 6. Agrupar Textos1 (mensagem_agrupada), AI Agent (ai_agent_json),
           Recebe WhatsApp1 (whatsapp_info + hasMedia)   [confere com os `$('...')` do JS fonte]
-  SV   <- Extrair Intencao Final1 (inp — assumido: é o $input direto do State Validator na
-          cadeia do fluxo; não há como confirmar 100% offline sem inspecionar as conexões do
-          workflow, mas bate com a ordem EIF1 -> State Validator do plano de migração),
+  SV   <- Extrair Intencao Final1 (inp, passado por `normalizar_ds()` antes de validar — o
+          pipeline real é EIF1 -> Normalizar DS -> State Validator, confirmado via
+          get_workflow_details do workflow principal 12/07/2026; Normalizar DS recalcula
+          dia_semana_coleta a partir de data_coleta e não tem arquivo _proposed_ no DEPLOY),
           Montar Contexto (base), Extrair Rota (er_output, mesmo turno)
 Compara contra o gabarito real gravado (`extrair_rota`/`state_validator`). Usa `hoje_fixado`
 (app.er) pra rodar cada turno com a data REAL do turno (campo `base.hoje`, setado por Montar
@@ -32,13 +33,15 @@ import sys
 from collections import Counter
 from datetime import datetime
 
+sys.stdout.reconfigure(encoding="utf-8")  # console cp1252 quebra em acento/seta (→) dos textos PT-BR
+
 import psycopg
 from psycopg.rows import dict_row
 
 sys.path.insert(0, __file__.rsplit("scripts", 1)[0])
 from app.config import PG_DSN  # noqa: E402
 from app.er import hoje_fixado, processar  # noqa: E402
-from app.state_validator import validar_estado  # noqa: E402
+from app.state_validator import normalizar_ds, validar_estado  # noqa: E402
 
 CAMPOS_ER_COMPARADOS = (
     "intencao_rapida", "rota_agente", "texto_ia", "coleta_unidade", "coleta_medico",
@@ -107,7 +110,7 @@ def replay_turno(row: dict) -> dict | None:
     sv_gabarito = row.get("state_validator")
     eif1 = row.get("extrair_intencao_final")
     if sv_gabarito and eif1:
-        sv = validar_estado(eif1, montar_contexto, er_gabarito, hoje=hoje.date())
+        sv = validar_estado(normalizar_ds(eif1), montar_contexto, er_gabarito, hoje=hoje.date())
         for campo in CAMPOS_SV_COMPARADOS:
             esperado = sv_gabarito.get(campo)
             obtido = getattr(sv, campo)

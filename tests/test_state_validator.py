@@ -8,7 +8,7 @@ internos vazando -> BLOCK), guard 7 (troca ilegal de unidade -> BLOCK).
 
 from datetime import date
 
-from app.state_validator import validar_estado
+from app.state_validator import normalizar_ds, validar_estado
 
 HOJE = date(2026, 7, 12)  # domingo
 
@@ -276,3 +276,29 @@ def test_tudo_vazio_allow():
     r = _run()
     assert r.sv_result == "ALLOW"
     assert r.sv_reason == ""
+
+
+# ---------- normalizar_ds (nó 'Normalizar DS', pipeline real EIF1 -> Normalizar DS -> SV) ----------
+
+def test_normalizar_ds_recalcula_a_partir_da_data():
+    # 2026-07-13 é segunda; dia_semana_coleta cru (errado) vem "ter"
+    out = normalizar_ds({"data_coleta": "2026-07-13", "dia_semana_coleta": "ter"})
+    assert out["dia_semana_coleta"] == "seg"
+
+
+def test_normalizar_ds_sem_data_nao_mexe_no_ds():
+    out = normalizar_ds({"data_coleta": "", "dia_semana_coleta": "ter"})
+    assert out["dia_semana_coleta"] == "ter"
+
+
+def test_normalizar_ds_data_invalida_nao_mexe_no_ds():
+    out = normalizar_ds({"data_coleta": "não é data", "dia_semana_coleta": "ter"})
+    assert out["dia_semana_coleta"] == "ter"
+
+
+def test_normalizar_ds_elimina_falso_reask_no_state_validator():
+    # antes do normalizador, dt=segunda + ds=terça cru dispararia dt_ds_inconsistente
+    inp_cru = _inp(data_coleta="2026-07-13", dia_semana_coleta="ter")
+    assert _run(inp_cru).sv_result == "REASK"
+    # depois do normalizador (pipeline real), ds passa a bater com dt -> ALLOW
+    assert _run(normalizar_ds(inp_cru)).sv_result == "ALLOW"

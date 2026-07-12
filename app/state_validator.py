@@ -28,6 +28,12 @@ pra validação), então não foram reaproveitadas de `er.py` (regra: só reusar
 não quando só parecido). `CONV_INVALIDO` existe no JS mas nunca é lido em lugar nenhum
 (dead code do guard 3 removido) — portado como constante não usada, fiel ao original, não
 "limpo" por conta própria.
+
+`normalizar_ds()`: pipeline real é EIF1 -> Normalizar DS -> State Validator (node de código sem
+`_proposed_` no DEPLOY, achado 12/07 investigando divergência no replay offline — ver docstring
+da função). Quem chama `validar_estado()` com `inp` vindo do EIF1 precisa passar por
+`normalizar_ds()` primeiro pra reproduzir o comportamento real (`app.er.processar` não precisa
+disso — é específico da entrada do State Validator).
 """
 
 from __future__ import annotations
@@ -69,6 +75,25 @@ def _norm_med(s: str) -> str:
 
 def _eh_sem_pref(s: str) -> bool:
     return _norm(s) == "sem preferencia"
+
+
+def normalizar_ds(inp: dict) -> dict:
+    """Port do nó n8n 'Normalizar DS' (Code) — roda ENTRE Extrair Intencao Final1 e State
+    Validator no fluxo real (confirmado via `get_workflow_details` do workflow principal,
+    12/07/2026, ao investigar divergências no replay offline). Não tem arquivo `_proposed_` no
+    DEPLOY — só existe ao vivo no n8n, nunca tinha sido documentado nem portado antes.
+
+    Recalcula `dia_semana_coleta` a partir de `data_coleta` sempre que `data_coleta` é uma data
+    válida, ANTES do State Validator rodar. Consequência prática: o guard `dt_ds_inconsistente`
+    de `validar_estado` praticamente nunca dispara em produção — `ds` é sempre derivado de `dt`
+    nesse ponto do fluxo, nunca chega dessincronizado. Sem aplicar isso antes de `validar_estado`
+    (como fazia o replay antes desse achado), sobra falso REASK toda vez que o EIF1 emite um
+    `dia_semana_coleta` cru que não bate com `data_coleta`."""
+    out = dict(inp)
+    dt = out.get("data_coleta") or ""
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", dt):
+        out["dia_semana_coleta"] = DS_MAP[(date.fromisoformat(dt).weekday() + 1) % 7]
+    return out
 
 
 @dataclass
