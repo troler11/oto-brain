@@ -35,6 +35,12 @@ arquivo cobre, em fatias sucessivas:
     e o resolvedor determinístico dia+período→busca completa (FIX_DIA_PERIODO_DETERMINISTICO).
     Introduz o fuzzy-matcher `_match_medico_key` (Levenshtein, tolera erro de digitação de até
     2 no nome do médico) usado por vários guards seguintes.
+  PARTE 7 (linhas 2794-3055): detecção de dia NÃO negado (`_dia_nao_negado_ok` — "não posso na
+    terça... tem quarta?" tem que achar quarta, não terça), FIX_DIA_CROSS_UNIT (médico não
+    atende esse dia na unidade atual mas atende na outra), FIX_ATENDENTE_SUBSTRING ("atendente"
+    contém "atende" — guard anti-falso-positivo), FIX_PERGUNTA_DIA ("atende terça?" — responde
+    com data literal calculada ou sugere trocar de unidade), FIX_TROCA_PERIODO, FIX_PROXIMO_HORARIO,
+    FIX_DIA_SEMANA_INJECT (com FIX_TROCA_PERIODO_GRADE e FIX_DIA_CROSS_UNIT_INJECT aninhados).
 O resto (guards de criação de consulta, cancelamento, empacotamento final) fica pra próximas
 fatias — cada uma seguindo o mesmo padrão de port fiel + testes.
 
@@ -3293,3 +3299,274 @@ def processar_medico_dia_periodo(
                     )
 
     return ResultadoParte6(base=base, intencao_rapida=intencao_rapida, rota_agente=rota_agente)
+
+
+# ============================================================================
+# PARTE 7 (linhas 2794-3055 do JS): dia negado, cross-unit, pergunta dia, troca período
+# ============================================================================
+
+_AB_DISPLAY = {"seg": "segunda", "ter": "terça", "qua": "quarta", "qui": "quinta", "sex": "sexta"}
+
+_DIAS_DCU = (
+    (("segunda", "seg"), "seg", "segunda"),
+    (("terca", "ter", "terça"), "ter", "terça"),
+    (("quarta", "qua"), "qua", "quarta"),
+    (("quinta", "qui"), "qui", "quinta"),
+    (("sexta", "sex"), "sex", "sexta"),
+)
+
+
+def _dia_nao_negado_ok(txt: str, pat: str):
+    """FIX_64577: 1º dia da mensagem que NÃO está negado. 'Não posso na terça... tem quarta?'
+    tem que achar 'quarta', não 'terça' (o primeiro match ingênuo pegaria terça)."""
+    g = re.compile(r"(?:^|\s)(" + pat + r")(?=\s|$|[.,!?;])")
+    for m in g.finditer(txt):
+        a = txt[max(0, m.start() - 25):m.start()]
+        d = txt[m.end():m.end() + 12]
+        if re.search(r"\bn(ao)?\b[^.,!?;]{0,20}$", a) or re.match(r"^\s*n(ao)?\b", d):
+            continue
+        return m
+    return None
+
+
+@dataclass
+class ResultadoParte7:
+    base: dict
+    intencao_rapida: str
+    rota_agente: int
+
+
+def processar_dia_periodo_avancado(
+    base: dict,
+    texto_usuario: str,
+    intencao_rapida: str,
+    rota_agente: int,
+    ia_output: dict,
+) -> ResultadoParte7:
+    # FIX_DIA_CROSS_UNIT (63549/64577)
+    if (rota_agente in (2, 3) and base.get("coleta_medico") and base.get("coleta_medico") != "sem preferencia"
+            and base.get("coleta_unidade") and not base.get("coleta_dia_semana") and _texto_ia_livre(base)):
+        txt_dcu = _norm(texto_usuario)
+        dia_dcu = None
+        for prefixos, ab, disp in _DIAS_DCU:
+            if any(_dia_nao_negado_ok(txt_dcu, p) for p in prefixos):
+                dia_dcu = (ab, disp)
+                break
+        if dia_dcu:
+            ab_dcu, disp_dcu = dia_dcu
+            mk_dcu = _medico_key(_norm(base.get("coleta_medico")))
+            unid_dcu = base["coleta_unidade"]
+            outra_dcu = "Tatuapé" if "Vila" in unid_dcu else "Vila Olímpia"
+            atende_atual_dcu = bool(_DLU_PERIODO.get(unid_dcu, {}).get(mk_dcu, {}).get(ab_dcu))
+            atende_outra_dcu = bool(_DLU_PERIODO.get(outra_dcu, {}).get(mk_dcu, {}).get(ab_dcu))
+            if not atende_atual_dcu and atende_outra_dcu:
+                per_outra = _DLU_PERIODO[outra_dcu][mk_dcu][ab_dcu]
+                per_txt = "manhã e tarde" if per_outra == "Ambos" else per_outra
+                base["coleta_dia_semana"] = ab_dcu
+                intencao_rapida = "pergunta_troca"
+                base["intencao_rapida"] = "pergunta_troca"
+                base["texto_ia"] = (
+                    f'[MEDICO DIA OUTRA UNIDADE: {base["coleta_medico"]} nao atende {disp_dcu} na {unid_dcu}, mas '
+                    f'atende {disp_dcu} ({per_txt}) no {outra_dcu}. Responder EXATAMENTE: "{base["coleta_medico"]} '
+                    f'nao atende {disp_dcu}-feira na {unid_dcu}, mas atende no {outra_dcu}. Deseja mudar de '
+                    'unidade ou escolher outro dia? 😊" NAO mude unid/med/conv no $$$. Aguarde resposta.] '
+                    + (base.get("texto_ia") or "")
+                )
+            elif mk_dcu and not atende_atual_dcu and not atende_outra_dcu:
+                grade_dcu = ", ".join(_AB_DISPLAY[d] for d in _DLU_PERIODO.get(unid_dcu, {}).get(mk_dcu, {}))
+                base["texto_ia"] = (
+                    f'[MEDICO DIA NENHUMA UNIDADE: {base["coleta_medico"]} nao atende {disp_dcu} em nenhuma '
+                    f'unidade. Responder EXATAMENTE: "{base["coleta_medico"]} nao atende {disp_dcu}-feira. Na '
+                    f'{unid_dcu} atende {grade_dcu}. Qual dia prefere? 😊" NAO mude nada no $$$.] '
+                    + (base.get("texto_ia") or "")
+                )
+
+    # FIX_ATENDENTE_SUBSTRING: "atendente" contem "atende" — evitar falso-positivo
+    eh_pergunta_dia = (
+        not re.search(r"atendente", texto_usuario, re.IGNORECASE)
+        and base.get("coleta_medico") != "sem preferencia"
+        and any(p in texto_usuario for p in (
+            "atende", "tem vaga", "tem horario", "trabalha", "tem na ", "tem segunda", "tem terca", "tem terça",
+            "tem quarta", "tem quinta", "tem sexta",
+        ))
+    )
+    if eh_pergunta_dia:
+        ia_output["eh_navegacao"] = False
+        if rota_agente == 4:
+            rota_agente = 3 if base.get("coleta_terceiro") == "true" else 2
+
+    # FIX_PERGUNTA_DIA: "atende [dia]?" — checa as duas unidades
+    if eh_pergunta_dia and base.get("coleta_medico") and base.get("coleta_medico") != "sem preferencia" and base.get("coleta_unidade"):
+        txt_pd = _strip_accents(texto_usuario)
+        dia_rx_pd = _dia_nao_negado_ok(txt_pd, "segunda|seg|terca|ter|quarta|qua|quinta|qui|sexta|sex")
+        dm_pd = {"segunda": 1, "seg": 1, "terca": 2, "ter": 2, "quarta": 3, "qua": 3, "quinta": 4, "qui": 4, "sexta": 5, "sex": 5}
+        dns_pd = {"segunda": "segunda", "seg": "segunda", "terca": "terça", "ter": "terça", "quarta": "quarta",
+                   "qua": "quarta", "quinta": "quinta", "qui": "quinta", "sexta": "sexta", "sex": "sexta"}
+        dab_pd = {"segunda": "seg", "seg": "seg", "terca": "ter", "ter": "ter", "quarta": "qua", "qua": "qua",
+                   "quinta": "qui", "qui": "qui", "sexta": "sex", "sex": "sex"}
+
+        med_norm = _norm(base.get("coleta_medico"))
+        med_key = _medico_key(med_norm)
+        unid_atual = base["coleta_unidade"]
+        outra_unid = "Tatuapé" if "Vila" in unid_atual else "Vila Olímpia"
+        med_nome_display = base["coleta_medico"]
+
+        if dia_rx_pd and dia_rx_pd.group(1) in dm_pd:
+            dia_pd = {"ds": dns_pd[dia_rx_pd.group(1)], "ab": dab_pd[dia_rx_pd.group(1)]}
+            atende_atual = bool(_DLU_PERIODO.get(unid_atual, {}).get(med_key, {}).get(dia_pd["ab"]))
+            atende_outra = bool(_DLU_PERIODO.get(outra_unid, {}).get(med_key, {}).get(dia_pd["ab"]))
+
+            if atende_atual:
+                prox_pd = _proxima_data_dow(dm_pd[dia_rx_pd.group(1)])
+                per_pd = _DLU_PERIODO[unid_atual][med_key][dia_pd["ab"]]
+                rota_agente = 4
+                base["_sub_rota_agenda"] = "navegacao"
+                intencao_rapida = "agenda"
+                base["coleta_dia_semana"] = dia_pd["ab"]
+                base["coleta_data"] = prox_pd
+                base["coleta_horario"] = ""
+                if per_pd == "Ambos":
+                    base["texto_ia"] = (
+                        f'[TROCA DIA: paciente quer {dia_pd["ds"]} ({prox_pd}). No $$$ use EXATAMENTE dt="{prox_pd}", '
+                        f'ds="{dia_pd["ds"]}", modo=2. ⛔ NAO calcule outra data, NAO use a data anterior. Pergunte: '
+                        '"Manha ou tarde? 😊"] ' + (base.get("texto_ia") or "")
+                    )
+                else:
+                    base["texto_ia"] = (
+                        f'[TROCA DIA: paciente quer {dia_pd["ds"]} (a partir de {prox_pd}), periodo {per_pd}. '
+                        f'Chame buscar_agenda com dt="{prox_pd}", per="{per_pd}". ⚠️ A tool PODE retornar uma data '
+                        f'POSTERIOR se {prox_pd} nao tiver vaga — mostre a DATA e os horarios que a TOOL retornar. '
+                        '⛔ NUNCA diga que nao ha vaga se a tool retornou horarios. ⛔ NAO invente horarios. No $$$ '
+                        f'use o dt que a TOOL retornou (pode nao ser {prox_pd}), per="{per_pd}", modo=2.] '
+                        + (base.get("texto_ia") or "")
+                    )
+            elif atende_outra:
+                base["coleta_dia_semana"] = dia_pd["ds"]
+                intencao_rapida = "pergunta_troca"
+                base["intencao_rapida"] = "pergunta_troca"
+                base["texto_ia"] = (
+                    f'[PERGUNTA DIA: {med_nome_display} NAO atende {dia_pd["ds"]} na {unid_atual}, mas atende no '
+                    f'{outra_unid}. Responder EXATAMENTE: "{med_nome_display} nao atende {dia_pd["ds"]} na '
+                    f'{unid_atual}, mas atende no {outra_unid}. Deseja mudar a consulta para la? 😊" Setar '
+                    f'ds="{dia_pd["ds"]}" no $$$. NAO mude os demais campos (unid/dt/per/conv). Aguarde '
+                    'confirmacao.] ' + (base.get("texto_ia") or "")
+                )
+            elif med_key:
+                grade_current = ", ".join(_AB_DISPLAY[d] for d in _DLU_PERIODO.get(unid_atual, {}).get(med_key, {}))
+                base["texto_ia"] = (
+                    f'[PERGUNTA DIA: {med_nome_display} NAO atende {dia_pd["ds"]} em nenhuma unidade. Responder '
+                    f'EXATAMENTE: "{med_nome_display} nao atende {dia_pd["ds"]}. Na {unid_atual} ela atende '
+                    f'{grade_current}. Qual dia prefere? 😊" NAO mude nada no $$$.] ' + (base.get("texto_ia") or "")
+                )
+        else:
+            grade_map = _GRADE_TEXTO["Vila Olímpia"] if "Vila" in unid_atual else _GRADE_TEXTO["Tatuapé"]
+            dias_med_gen = grade_map.get(med_key, "")
+            if dias_med_gen:
+                base["texto_ia"] = (
+                    '[PERGUNTA DIA GENERICA: Paciente perguntou dias de atendimento. Responder EXATAMENTE: '
+                    f'"{med_nome_display} atende {dias_med_gen}. Qual dia prefere? 😊" NAO mude nada no $$$.]  '
+                    + (base.get("texto_ia") or "")
+                )
+
+    # FIX_TROCA_PERIODO: pediu periodo diferente do salvo → invalida cache
+    if rota_agente == 4 and base.get("cache_ativo"):
+        txt_tp = _norm(texto_usuario)
+        per_atual = (base.get("coleta_periodo") or "").lower()
+        novo_per = ""
+        if any(p in txt_tp for p in ("tarde", "a tarde", "de tarde", "pela tarde")) and per_atual == "manha":
+            novo_per = "tarde"
+        elif any(p in txt_tp for p in ("manha", "de manha", "pela manha")) and per_atual == "tarde":
+            novo_per = "manha"
+        if novo_per:
+            base["coleta_periodo"] = novo_per
+            ia_output["eh_navegacao"] = False
+            udi_tp = base.get("ultimo_dia_exibido")
+            data_base_tp = udi_tp.get("data") if isinstance(udi_tp, dict) and udi_tp.get("data") else (base.get("coleta_data") or "")
+            base["eh_troca_data"] = True
+            base["data_alvo_troca"] = data_base_tp
+            base["medico_troca"] = "sem preferencia" if (_int(base.get("coleta_modo")) == 1 or not base.get("coleta_medico")) else base["coleta_medico"]
+
+    # FIX_PROXIMO_HORARIO (C3)
+    if rota_agente in (2, 3, 4) and base.get("coleta_medico") and base.get("coleta_unidade") and _texto_ia_livre(base):
+        txt_ph = _norm(texto_usuario)
+        eh_prox_horario = any(p in txt_ph for p in (
+            "proximo horario", "proxima horario", "primeiro horario", "primeira horario", "qualquer horario",
+            "proximo disponivel", "primeiro disponivel", "proxima vaga", "primeira vaga", "qualquer vaga",
+        ))
+        if eh_prox_horario:
+            base["coleta_periodo"] = ""
+            base["texto_ia"] = (
+                f'[PROXIMO HORARIO DISPONIVEL: paciente quer o primeiro horario disponivel com '
+                f'{base["coleta_medico"]}. Chame buscar_agenda SEM periodo (per="") para ver manha e tarde. Se '
+                'FILTRO_SEM_RESULTADO, chame buscar_agenda de novo SEM dia_semana e SEM periodo antes de dizer '
+                'que nao ha vagas. NAO restrinja por periodo. Setar per="" no $$$.] ' + (base.get("texto_ia") or "")
+            )
+
+    # FIX_DIA_SEMANA_INJECT (+ FIX_TROCA_PERIODO_GRADE + FIX_DIA_CROSS_UNIT_INJECT aninhados)
+    if rota_agente == 4 and not eh_pergunta_dia and _texto_ia_livre(base):
+        txt_ds = _norm(base.get("texto_ia") or "")
+        dia_map = {"segunda": 1, "seg": 1, "terca": 2, "ter": 2, "quarta": 3, "qua": 3, "quinta": 4, "qui": 4, "sexta": 5, "sex": 5}
+        dia_nome_map = {"segunda": "segunda", "seg": "segunda", "terca": "terca", "ter": "terca", "quarta": "quarta",
+                         "qua": "quarta", "quinta": "quinta", "qui": "quinta", "sexta": "sexta", "sex": "sexta"}
+        dia_rx = _dia_nao_negado_ok(txt_ds, "segunda|seg|terca|ter|quarta|qua|quinta|qui|sexta|sex")
+        dia_sem_det = None
+        if dia_rx and dia_rx.group(1) in dia_map:
+            dia_sem_det = {"dow": dia_map[dia_rx.group(1)], "nome": dia_nome_map[dia_rx.group(1)]}
+
+        if dia_sem_det:
+            prox_data = _proxima_data_dow(dia_sem_det["dow"])
+            med_busca = "sem preferencia" if (_int(base.get("coleta_modo")) == 1 or not base.get("coleta_medico")) else base["coleta_medico"]
+            base["eh_troca_data"] = True
+            base["data_alvo_troca"] = prox_data
+            base["dia_semana_troca"] = dia_sem_det["nome"]
+            base["medico_troca"] = med_busca
+
+            ds_ab_per = {"segunda": "seg", "terca": "ter", "quarta": "qua", "quinta": "qui", "sexta": "sex"}
+            ab_per = ds_ab_per.get(dia_sem_det["nome"])
+            mk_per = _medico_key(_norm(base.get("coleta_medico")))
+            menc_per_ds = re.search(r"\b(manha|tarde)\b", txt_ds)
+            grade_per = _DLU_PERIODO.get(base.get("coleta_unidade"), {}).get(mk_per, {}).get(ab_per) if (mk_per and ab_per) else None
+            if menc_per_ds:
+                base["coleta_periodo"] = menc_per_ds.group(1)
+            elif grade_per in ("manha", "tarde"):
+                base["coleta_periodo"] = grade_per
+            elif grade_per == "Ambos" and not base.get("coleta_periodo"):
+                base["coleta_periodo"] = "manha"
+
+            # FIX_DIA_CROSS_UNIT_INJECT
+            if base.get("coleta_medico") and base.get("coleta_unidade") and _int(base.get("coleta_modo")) != 1 and _texto_ia_livre(base):
+                ab_dsi = ds_ab_per.get(dia_sem_det["nome"])
+                mk_dsi = _medico_key(_norm(base.get("coleta_medico")))
+                unid_atual_dsi = base["coleta_unidade"]
+                outra_unid_dsi = "Tatuapé" if "Vila" in unid_atual_dsi else "Vila Olímpia"
+                if ab_dsi and mk_dsi:
+                    works_here_dsi = bool(_DLU_EXISTE.get(unid_atual_dsi, {}).get(mk_dsi, {}).get(ab_dsi))
+                    works_other_dsi = bool(_DLU_EXISTE.get(outra_unid_dsi, {}).get(mk_dsi, {}).get(ab_dsi))
+                    if not works_here_dsi and works_other_dsi:
+                        rota_agente = 3 if base.get("coleta_terceiro") == "true" else 2
+                        base["eh_troca_data"] = False
+                        base["data_alvo_troca"] = ""
+                        base["coleta_dia_semana"] = ab_dsi
+                        intencao_rapida = "pergunta_troca"
+                        base["intencao_rapida"] = "pergunta_troca"
+                        base["texto_ia"] = (
+                            f'[PERGUNTA DIA: {base["coleta_medico"]} nao atende {dia_sem_det["nome"]} na '
+                            f'{unid_atual_dsi}, mas atende {dia_sem_det["nome"]} no {outra_unid_dsi}. Responder '
+                            f'EXATAMENTE: "{base["coleta_medico"]} nao atende {dia_sem_det["nome"]} na '
+                            f'{unid_atual_dsi}, mas atende {dia_sem_det["nome"]} no {outra_unid_dsi}. Deseja mudar '
+                            f'a consulta para la? 😊" Setar ds="{ab_dsi}" no $$$. NAO mude os demais campos '
+                            '(unid/dt/per/conv). Aguarde confirmacao.] ' + texto_usuario
+                        )
+                    elif not works_here_dsi and not works_other_dsi:
+                        gr_med_dsi = base.get("grade_med") or ""
+                        mk_grade_dsi = next((l for l in gr_med_dsi.split("\n") if mk_dsi in l.lower()), "")
+                        rota_agente = 3 if base.get("coleta_terceiro") == "true" else 2
+                        base["eh_troca_data"] = False
+                        base["data_alvo_troca"] = ""
+                        base["texto_ia"] = (
+                            f'[DIA INVALIDO: {base["coleta_medico"]} nao atende {dia_sem_det["nome"]} em nenhuma '
+                            'unidade. Informar dias disponiveis. '
+                            + (f'Grade: {mk_grade_dsi.strip()}' if mk_grade_dsi else "") + '] ' + texto_usuario
+                        )
+
+    return ResultadoParte7(base=base, intencao_rapida=intencao_rapida, rota_agente=rota_agente)
