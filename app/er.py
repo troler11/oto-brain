@@ -90,8 +90,19 @@ arquivo cobre, em fatias sucessivas:
     `ResultadoParte9`, adicionado a esse dataclass agora porque só aqui ele volta a ser lido)
     entram como parâmetros. **Achado**: `_LM_VO`/`_LM_TA` (listas de médicos formatadas) são
     declaradas no bloco DADOS_MED_INJECT do JS mas nunca lidas — dead code, omitido no port.
-O resto (guards de criação de consulta, cancelamento, empacotamento final) fica pra próximas
-fatias — cada uma seguindo o mesmo padrão de port fiel + testes.
+  PARTE 13 (linhas 4411-4661): FIX_AGRADECIMENTO_CONCLUIDO (agradecimento pós-agendamento →
+    encerramento educado + reset pra triagem), FIX_TRIAGEM_AGENDA (saudação + intenção de
+    agendar na mesma msg não deve reativar o menu principal), FIX_TRIAGEM_SIM_AGENDA ("sim" puro
+    na triagem = quer agendar) e FIX_MULTI_ENTIDADES — o maior guard do arquivo: captura
+    unidade/convênio/médico/dia/período de UMA mensagem só (multi-entidade), valida médico+dia
+    contra a grade, persiste via `_pmsg` mesmo se o LLM não ecoar o `$$$`, e decide se a resposta
+    pede o próximo campo faltante ou já dispara `buscar_agenda` (coleta completa). `_MEDICO_TYPO_RX`
+    (regex de tolerância a erro de digitação por médico) foi promovido a constante de módulo nesta
+    parte — usado aqui E em FIX_OMINT_MENCAO_MEDICO (Parte 11), confirmado byte-a-byte idêntico
+    nos dois guards do JS original.
+O resto (guards de encerramento/pedido de humano + empacotamento final da resposta pro n8n,
+incluindo a leitura ao vivo do nó "Triagem Determinística (Pre-IA)" pro shadow-mode) fica pra
+Parte 14 — a última fatia deste port.
 
 Como em app/eif1.py: PORT, não reescrita — ordem dos blocos e regras exatas espelham o JS de
 propósito, pra permitir comparação 1:1 na validação.
@@ -2297,6 +2308,14 @@ def processar_sub_rota_agenda(
 # ============================================================================
 
 _NOMES_DOCS_DETECT = ("giseli", "caio", "elias", "jose", "stephanie", "juliana", "torcuato", "fernanda")
+
+# Regex tolerante a erro de digitação por médico — usado em FIX_OMINT_MENCAO_MEDICO (Parte 11) e
+# FIX_MULTI_ENTIDADES (Parte 13), byte-a-byte idêntico nos dois guards do JS original.
+_MEDICO_TYPO_RX = {
+    "giseli": r"\bgisel?l?[iey]\b|\bgizel[iy]\b", "caio": r"\bcaio\b", "elias": r"\belias\b|\bhelias\b",
+    "jose": r"\bjose\b|\bemm?anuel\b|\bburle\b", "stephanie": r"\be?st[ea](f|ph)an[iy]e?\b",
+    "juliana": r"\bjuliana\b", "torcuato": r"\btor[ckq]u?at[ou]\b", "fernanda": r"\bfernanda\b",
+}
 
 _DOC_FULLNAME = {
     "giseli": "Dra. Giseli Rebechi", "caio": "Dr. Caio Vinicius Saettini", "elias": "Dr. Elias Lobo Braga",
@@ -5123,12 +5142,7 @@ def processar_convenio_omint_e_ultimo(
         rota_agente in (2, 3) and conv_oma.startswith("omint ")
         and "[OMINT" not in (base.get("texto_ia") or "") and not re.search(r"particular|\bpart\b", txt_oma)
     ):
-        rx_ome = {
-            "giseli": r"\bgisel?l?[iey]\b|\bgizel[iy]\b", "elias": r"\belias\b|\bhelias\b",
-            "jose": r"\bjose\b|\bemm?anuel\b|\bburle\b", "stephanie": r"\be?st[ea](f|ph)an[iy]e?\b",
-            "juliana": r"\bjuliana\b", "fernanda": r"\bfernanda\b", "caio": r"\bcaio\b",
-            "torcuato": r"\btor[ckq]u?at[ou]\b",
-        }
+        rx_ome = _MEDICO_TYPO_RX
         full_ome = {
             "giseli": "a Dra. Giseli Rebechi", "elias": "o Dr. Elias Lobo Braga",
             "jose": "o Dr. Jose Emmanuel Burle Neto", "stephanie": "a Dra. Stephanie Rugeri de Souza",
@@ -5559,3 +5573,360 @@ def processar_particular_dados_med_triagem(
             )
 
     return ResultadoParte12(base=base, intencao_rapida=intencao_rapida, rota_agente=rota_agente)
+
+
+# ---------------------------------------------------------------------------------------------
+# PARTE 13 (linhas 4411-4661)
+# ---------------------------------------------------------------------------------------------
+
+# Grade com qualificador de período completo (ex: "terça (manhã e tarde)") — usada só no resumo
+# de FIX_MULTI_ENTIDADES; parecida mas NÃO idêntica a `_GRADE_TEXTO` (que omite "(manhã e tarde)"
+# quando o médico atende ambos os períodos), por isso mantida separada.
+_GDISP_PM = {
+    "Vila Olímpia": {
+        "giseli": "terça (manhã e tarde), quarta (só manhã), sexta (só manhã)",
+        "elias": "terça (só tarde), quarta (manhã e tarde)",
+        "jose": "segunda (manhã e tarde), quarta (só manhã), quinta (manhã e tarde)",
+        "stephanie": "segunda (manhã: teleconsulta / tarde: presencial), terça (só manhã — teleconsulta), "
+                     "quarta (só tarde)",
+        "juliana": "segunda (só tarde), sexta (só tarde)",
+        "torcuato": "quarta (só tarde), quinta (manhã e tarde), sexta (manhã e tarde)",
+        "fernanda": "quinta (só tarde)", "caio": "terça (só manhã)",
+    },
+    "Tatuapé": {
+        "elias": "segunda (manhã e tarde), sexta (só manhã)", "jose": "terça", "caio": "quarta",
+        "giseli": "quinta", "fernanda": "sexta (só tarde)",
+    },
+}
+
+
+@dataclass
+class ResultadoParte13:
+    base: dict
+    intencao_rapida: str
+    rota_agente: int
+    deve_resetar_agradecimento: bool = False
+
+
+def processar_agradecimento_triagem_multidados(
+    base: dict,
+    texto_usuario: str,
+    intencao_rapida: str,
+    rota_agente: int,
+    ia_output: dict,
+) -> ResultadoParte13:
+    """Linhas 4411-4661 do JS fonte: FIX_AGRADECIMENTO_CONCLUIDO, FIX_TRIAGEM_AGENDA,
+    FIX_TRIAGEM_SIM_AGENDA e FIX_MULTI_ENTIDADES (captura multi-entidade + validação contra a
+    grade + persistência via `_pmsg` + próxima pergunta ou busca completa)."""
+
+    deve_resetar_agradecimento = False
+
+    # FIX_AGRADECIMENTO_CONCLUIDO: paciente agradece apos concluir agendamento -> encerramento
+    if base.get("sessao_intencao") == "concluido":
+        txt_agr = _norm(texto_usuario)
+        txt_agr_limpo = re.sub(r"\s+", " ", re.sub(r"[^a-z\s]", " ", txt_agr)).strip()
+        eh_agr = (
+            bool(re.match(
+                r"^(obrigad[ao]|muito obrigad[ao]|obrigad[ao] demais|valeu|agradec[oa]|grat[ao]|ok obrigad[ao]|"
+                r"ok valeu|perfeito obrigad[ao]|tchau|ate logo|ate mais|show|certo|beleza|otimo|ok|tudo bem)$",
+                txt_agr,
+            ))
+            or (
+                bool(re.match(r"^(obrigad|valeu|agradec)", txt_agr))
+                and not re.search(
+                    r"agend|marcar|remarc|cancel|desmarc|consult|horari|medic|atendente", txt_agr_limpo,
+                )
+            )
+            or (
+                bool(re.search(r"(^|\s)(obrigad[ao]|valeu|agradec\w*|grat[ao])(\s|$)", txt_agr_limpo))
+                and len(txt_agr_limpo.split(" ")) <= 5
+                and not re.search(
+                    r"agend|marcar|remarc|cancel|desmarc|consult|horari|medic|atendente", txt_agr_limpo,
+                )
+            )
+        )
+        if eh_agr:
+            rota_agente = 0
+            intencao_rapida = "triagem"
+            deve_resetar_agradecimento = True
+            base["texto_ia"] = (
+                '[ENCERRAMENTO: paciente agradeceu apos concluir o agendamento. Responda EXATAMENTE: "Eu que '
+                'agradeço! Fico à disposição para o que precisar. 😊" ⛔ NAO mostre o menu principal. ⛔ NAO '
+                'pergunte nada. ⛔ NAO mencione agendamento.]'
+            )
+
+    # FIX_TRIAGEM_AGENDA: saudacao + intencao de agendar na mesma msg nao reativa o menu principal
+    if base.get("sessao_intencao") == "triagem" and rota_agente in (0, 2, 3):
+        agenda_kw = re.search(
+            r"hor[aá]rios?|dispon[ií]v|agendar|agendamento|marcar.{0,20}consult|quer\w*.{0,20}consul|"
+            r"precis.{0,15}consul|tem\s+vaga|agenda\s+(da|do|de)\s+(dr|dra)", texto_usuario, re.IGNORECASE,
+        )
+        eh_cancel_txt = bool(re.search(r"cancel|desmarcar|desistir", texto_usuario, re.IGNORECASE))
+        eh_remarc_txt = bool(re.search(r"remarc|reagend", texto_usuario, re.IGNORECASE))
+        if agenda_kw and not eh_cancel_txt and not eh_remarc_txt:
+            if rota_agente == 0:
+                rota_agente = 2
+            intencao_rapida = "coleta"
+            if _texto_ia_livre(base):
+                base["texto_ia"] = (
+                    '[INICIO AGENDA: paciente quer agendar (mesmo com saudação junto, ex: "Boa tarde! Gostaria '
+                    'de..."). ⛔ NAO ative a SAUDAÇÃO/menu principal — a intenção já é clara. Vá direto ao P1 '
+                    '(para quem é a consulta).] ' + texto_usuario
+                )
+
+    # FIX_TRIAGEM_SIM_AGENDA: "s"/"sim" puro em sessao de triagem = quer agendar
+    if (
+        base.get("sessao_intencao") == "triagem" and rota_agente in (0, 2) and _texto_ia_livre(base)
+        and not base.get("coleta_unidade") and not base.get("coleta_medico") and not base.get("coleta_data")
+        and not base.get("coleta_convenio")
+    ):
+        txt_ts = _norm(texto_usuario)
+        if re.match(r"^(s|si|sim|quero|quero sim|sim quero|bora|vamos)[!.,\s]*$", txt_ts):
+            pacs_ts = base.get("pacientes") or []
+            if len(pacs_ts) == 1:
+                q_p1_ts = f'A consulta será para {pacs_ts[0].get("nome")} ou para outra pessoa? 😊'
+            elif len(pacs_ts) >= 2:
+                nomes_ts = ", ".join(p.get("nome", "") for p in pacs_ts)
+                q_p1_ts = f'A consulta será para {nomes_ts}? Ou para outra pessoa? 😊'
+            else:
+                q_p1_ts = "A consulta será para você ou para outra pessoa? 😊"
+            rota_agente = 2
+            intencao_rapida = "coleta"
+            base["texto_ia"] = (
+                '[INICIO AGENDA CONFIRMADO: paciente confirmou que quer agendar. Setar i="coleta" no $$$. '
+                f'Responder EXATAMENTE: "Perfeito! Vou te ajudar a agendar. 😊 {q_p1_ts}" ⛔ NAO pergunte "o que '
+                'posso fazer". ⛔ NAO re-pergunte se quer agendar. ⛔ NAO mostre o menu principal.] ' + texto_usuario
+            )
+
+    # FIX_MULTI_ENTIDADES: captura varias entidades de UMA mensagem so
+    em_coleta_pm = intencao_rapida in ("coleta", "agenda") and rota_agente in (2, 3)
+    tia_pm = base.get("texto_ia") or ""
+    override_pm = (
+        "[DADOS_MED", "[MEDICO MULTI DIA", "[MEDICO DIA", "[DIA RESOLVIDO", "[DIA+PERIODO", "[DIA INVALIDO",
+        "[DIA_SEMANA_INVALIDO", "[DATA OK", "[DATA INVALIDA", "[PERIODO OBRIGATORIO", "[PERIODO UNICO",
+        "[PERIODO RESOLVIDO", "[CONVENIO OBRIGATORIO", "[CONVENIO ACEITO", "[CONV ACEITO", "[MENU_P3_INVALIDO",
+        "[P3 MENU OBRIGATORIO", "[UNIDADE INVALIDA", "[INICIO AGENDA", "[INICIO COLETA", "[QUEM CONFIRMADO",
+        "[PACIENTE JA IDENTIFICADO",
+    )
+    pode_override_pm = "[" not in tia_pm or any(t in tia_pm for t in override_pm)
+    identidade_incompleta_pm = not base.get("paciente_encontrado")
+
+    if em_coleta_pm and not identidade_incompleta_pm and pode_override_pm:
+        txt_pm2 = _norm(texto_usuario)
+        txt_per_pm = re.sub(r"\bboa tarde\b|\bbom dia\b|\bboa noite\b", " ", txt_pm2)
+
+        cap = {}
+
+        # unidade
+        if not base.get("coleta_unidade"):
+            if re.search(r"vila\s*oli|ol[iy]m+[iy]?p+[iy]*a", txt_pm2):
+                cap["unid"] = "Vila Olímpia"
+            elif re.search(r"tatua?p", txt_pm2):
+                cap["unid"] = "Tatuapé"
+        unid_final_pm = cap.get("unid") or base.get("coleta_unidade") or ""
+
+        # convenio (Porto/Itau sempre; Bradesco so fora de Tatuape; Omint/Particular tem fluxo proprio)
+        if not base.get("coleta_convenio"):
+            if re.search(r"porto\s*seguro|\bporto\b", txt_pm2):
+                cap["conv"] = "Porto Seguro"
+            elif re.search(r"\bitau\b", txt_pm2):
+                cap["conv"] = "Itaú"
+            elif re.search(r"bradesco", txt_pm2) and "Tatu" not in unid_final_pm:
+                cap["conv"] = "Bradesco"
+
+        # medico (tolerante a typo; ignora nome de paciente da conta)
+        if not base.get("coleta_medico") or base.get("coleta_medico") == "sem preferencia":
+            nomes_pac_pm = [_norm(p.get("nome") or "") for p in (base.get("pacientes") or [])]
+            nomes_pac_pm.append(_norm(base.get("nome_dependente") or ""))
+            key_pm = None
+            for k in _FULL_MD:
+                rx = _MEDICO_TYPO_RX[k]
+                if re.search(rx, txt_pm2) and not any(re.search(rx, n) or k in n for n in nomes_pac_pm):
+                    key_pm = k
+                    break
+            if key_pm:
+                cap["med"] = _FULL_MD[key_pm]
+                cap["modo"] = 3
+
+        # dia (amanha/hoje/dia da semana — datas pre-computadas em BRT pelo Montar Contexto)
+        if not base.get("coleta_data"):
+            if re.search(r"\bamanha\b", txt_pm2):
+                cap["dt"] = base.get("amanha") or ""
+            elif re.search(r"\bhoje\b", txt_pm2):
+                cap["dt"] = base.get("hoje") or ""
+            else:
+                dia_pmm = re.search(r"\b(segunda|terca|quarta|quinta|sexta)\b", txt_pm2)
+                if dia_pmm:
+                    map_dt_pm = {
+                        "segunda": base.get("prox_seg"), "terca": base.get("prox_ter"),
+                        "quarta": base.get("prox_qua"), "quinta": base.get("prox_qui"),
+                        "sexta": base.get("prox_sex"),
+                    }
+                    cap["dt"] = map_dt_pm.get(dia_pmm.group(1)) or ""
+                    cap["ds"] = dia_pmm.group(1)
+
+        # periodo (palavra ou hora explicita; saudacoes ja removidas)
+        if not base.get("coleta_periodo"):
+            h_pmm = re.search(r"\b(\d{1,2})\s*h(?:\b|s|\d{2})|\bas\s+(\d{1,2})\b", txt_per_pm)
+            if re.search(r"\bmanha\b|de manha|pela manha|cedo\b", txt_per_pm):
+                cap["per"] = "manha"
+            elif re.search(r"\btarde\b|de tarde|pela tarde|a tarde\b|depois do almoco", txt_per_pm):
+                cap["per"] = "tarde"
+            elif h_pmm:
+                h_pm = int(h_pmm.group(1) or h_pmm.group(2))
+                if 6 <= h_pm <= 20:
+                    cap["per"] = "tarde" if h_pm >= 12 else "manha"
+
+        cap_count = len([k for k in cap if k not in ("modo", "ds")])
+        own_pm = not ia_output.get("bypass_agente_humano") and (
+            cap_count >= 2
+            or (cap_count == 1 and ("[" not in tia_pm or base.get("_quem_resolvido_turno") is True))
+        )
+
+        if cap_count >= 1:
+            if cap.get("unid"):
+                base["coleta_unidade"] = cap["unid"]
+            if cap.get("conv"):
+                base["coleta_convenio"] = cap["conv"]
+            if cap.get("med"):
+                base["coleta_medico"] = cap["med"]
+                base["coleta_modo"] = 3
+            if cap.get("dt"):
+                base["coleta_data"] = cap["dt"]
+                if cap.get("ds"):
+                    base["coleta_dia_semana"] = cap["ds"]
+            if cap.get("per"):
+                base["coleta_periodo"] = cap["per"]
+                base["_periodo_precomputed"] = True
+
+            aviso_pm = ""
+            med_real_pm = bool(
+                base.get("coleta_medico") and base["coleta_medico"] not in ("sem preferencia", "__CLEAR__")
+                and any(k in _norm(base["coleta_medico"]) for k in _FULL_MD)
+            )
+            if med_real_pm and base.get("coleta_unidade") and base.get("coleta_data"):
+                uk_pm = "Tatuapé" if "Tatu" in base["coleta_unidade"] else "Vila Olímpia"
+                mk_pm = next((k for k in _FULL_MD if k in _norm(base["coleta_medico"])), None)
+                if base.get("coleta_dia_semana"):
+                    ab_pm = _DS_AB.get(base["coleta_dia_semana"], base["coleta_dia_semana"][:3])
+                else:
+                    ab_pm = _DOW_TO_AB_DA[_dow_js(base["coleta_data"])]
+                pers_pm = _GRADE_DP.get(uk_pm, {}).get(mk_pm, {}).get(ab_pm) if mk_pm else None
+                if mk_pm and not pers_pm:
+                    disp_pm = _AB_DISPLAY.get(ab_pm, ab_pm)
+                    aviso_pm = f'{base["coleta_medico"]} não atende {disp_pm} na {uk_pm}. '
+                    base["coleta_data"] = ""
+                    base["coleta_dia_semana"] = ""
+                    cap.pop("dt", None)
+                    cap.pop("ds", None)
+                    clear_pm_mp = base.get("_clear_pm") or {}
+                    clear_pm_mp.update({"dt": 1, "ds": 1})
+                    base["_clear_pm"] = clear_pm_mp
+                elif pers_pm and len(pers_pm) == 1 and base.get("coleta_periodo") != pers_pm[0]:
+                    if base.get("coleta_periodo"):
+                        per_disp_mp = "manhã" if pers_pm[0] == "manha" else "tarde"
+                        aviso_pm = (
+                            f'Nesse dia {base["coleta_medico"]} atende só pela {per_disp_mp}, já deixei '
+                            'anotado. '
+                        )
+                    base["coleta_periodo"] = pers_pm[0]
+                    base["_periodo_precomputed"] = True
+                    cap["per"] = pers_pm[0]
+
+            base["_pmsg"] = {
+                "unid": cap.get("unid", ""), "conv": cap.get("conv", ""), "med": cap.get("med", ""),
+                "modo": 3 if cap.get("med") else 0, "dt": cap.get("dt", ""), "ds": cap.get("ds", ""),
+                "per": cap.get("per", ""),
+            }
+
+            if own_pm:
+                quem_ok_pm = bool(
+                    (base.get("nome_dependente") or "").strip() or (base.get("coleta_id_tisaude") or "").strip()
+                )
+                resumo_pm = ", ".join(x for x in (
+                    cap.get("unid"), cap.get("med"), "dia" if cap.get("dt") else "",
+                    "período" if cap.get("per") else "", cap.get("conv"),
+                ) if x)
+                set_parts_pm = [
+                    f'unid="{cap["unid"]}"' if cap.get("unid") else "",
+                    f'med="{cap["med"]}", modo=3' if cap.get("med") else "",
+                    f'dt="{base["coleta_data"]}"' if cap.get("dt") and base.get("coleta_data") else "",
+                    f'ds="{cap["ds"]}"' if cap.get("ds") and base.get("coleta_dia_semana") else "",
+                    f'per="{cap["per"]}"' if cap.get("per") else "",
+                    f'conv="{cap["conv"]}"' if cap.get("conv") else "",
+                ]
+                set_pm = ", ".join(x for x in set_parts_pm if x)
+
+                q_pm = ""
+                pacs_pm = base.get("pacientes") or []
+                if not quem_ok_pm:
+                    if len(pacs_pm) == 1:
+                        q_pm = f'A consulta será para {pacs_pm[0].get("nome")} ou para outra pessoa? 😊'
+                    elif len(pacs_pm) >= 2:
+                        nomes_pm = ", ".join(p.get("nome", "") for p in pacs_pm)
+                        q_pm = f'A consulta será para {nomes_pm} ou para outra pessoa? 😊'
+                    else:
+                        q_pm = "A consulta será para você ou para outra pessoa? 😊"
+                elif not base.get("coleta_unidade"):
+                    q_pm = (
+                        'Temos dois endereços de atendimento, qual a melhor unidade para você?\nDigite o '
+                        'número correspondente:\n\n1️⃣ Vila Olímpia\n2️⃣ Tatuapé'
+                    )
+                elif not med_real_pm:
+                    ult_med_global_pm = base.get("_ultimo_medico_global") or ""
+                    if ult_med_global_pm:
+                        ela_pm = (
+                            "ela" if re.search(r"giseli|stephanie|juliana|fernanda", ult_med_global_pm, re.IGNORECASE)
+                            else "ele"
+                        )
+                        q_pm = (
+                            f'Você já consultou com {ult_med_global_pm}. Deseja agendar com {ela_pm} novamente '
+                            'ou prefere outro médico? 😊'
+                        )
+                    else:
+                        q_pm = (
+                            'Com qual médico você prefere?\nDigite o número ou escreva:\n\n1️⃣ Primeiro horário '
+                            'disponível\n2️⃣ Escolher especialista\n3️⃣ Já tenho médico de preferência'
+                        )
+                elif not base.get("coleta_data"):
+                    uk_pm2 = "Tatuapé" if "Tatu" in base["coleta_unidade"] else "Vila Olímpia"
+                    mk_pm2 = next((k for k in _FULL_MD if k in _norm(base["coleta_medico"])), None)
+                    gd_pm = _GDISP_PM.get(uk_pm2, {}).get(mk_pm2, "") if mk_pm2 else ""
+                    q_pm = base["coleta_medico"] + (f' atende {gd_pm}.' if gd_pm else "") + " Qual dia prefere? 😊"
+                elif not base.get("coleta_periodo"):
+                    q_pm = "Manhã ou tarde? 😊"
+                elif base.get("coleta_convenio") == "OMINT?":
+                    q_pm = (
+                        'Qual é a categoria do seu plano Omint? 😊\nDigite o número:\n\n1️⃣ Premium\n2️⃣ Skill\n'
+                        '3️⃣ Corporation\n4️⃣ Não sei informar'
+                    )
+                elif not base.get("coleta_convenio") or base["coleta_convenio"] in ("PART?", "RESET_CONV"):
+                    q_pm = (
+                        "A consulta será Particular ou Convênio? 😊" if base.get("coleta_convenio") == "PART?"
+                        else (base.get("_pergunta_convenio_global") or "A consulta será Particular ou Convênio? 😊")
+                    )
+
+                if q_pm:
+                    base["texto_ia"] = (
+                        f'[MULTI DADOS: identifiquei na mensagem: {resumo_pm}. '
+                        + (f'Setar {set_pm} no $$$ e ' if set_pm else '')
+                        + 'PRESERVAR d/c/n. ⛔ NAO re-pergunte campos ja preenchidos. Responder EXATAMENTE: "'
+                        f'{aviso_pm}{q_pm}"] ' + texto_usuario
+                    )
+                else:
+                    rota_agente = 4
+                    base["_sub_rota_agenda"] = "navegacao"
+                    intencao_rapida = "agenda"
+                    base["texto_ia"] = (
+                        f'[MULTI DADOS COMPLETO: identifiquei na mensagem: {resumo_pm} — coleta completa. '
+                        + (f'Setar {set_pm} no $$$ e ' if set_pm else '')
+                        + 'PRESERVAR d/c/n. Chame buscar_agenda AGORA com os dados salvos (unidade, medico, '
+                        'data e periodo do ESTADO SALVO) e mostre os horarios que a TOOL retornar. '
+                        + (f'Antes dos horarios, diga: "{aviso_pm.strip()}". ' if aviso_pm else '')
+                        + '⛔ NUNCA invente horarios. ⛔ NAO re-pergunte nada.] ' + texto_usuario
+                    )
+
+    return ResultadoParte13(
+        base=base, intencao_rapida=intencao_rapida, rota_agente=rota_agente,
+        deve_resetar_agradecimento=deve_resetar_agradecimento,
+    )
