@@ -49,6 +49,16 @@ arquivo cobre, em fatias sucessivas:
     texto livre — duas cópias quase idênticas do mesmo menu P3), limpeza de resíduo zumbi
     terceiro==titular (FIX_58755) e FIX_MESMO_MEDICO_SIM (resposta determinística de sim/não pro
     "deseja agendar com o mesmo médico da última vez?").
+  PARTE 9 (linhas 3470-3689): FIX_59087 (menu P3 numérico "1/2/3" respondido com texto literal
+    por opção, evitando o LLM recompor lista_med e cortar médico), FIX_NOME_INJECT_TITULAR
+    (pré-identifica o paciente titular certo quando há 2+ cadastrados no telefone, via match
+    exato/substring ou fuzzy Levenshtein ≤2 do nome digitado) e o bloco FAQ_INJECT completo
+    (14 categorias de pergunta frequente detectadas por radical de palavra, com retomada
+    determinística da coleta/agenda onde a conversa parou). `sessao_era_agenda_com_coleta`,
+    `tem_identidade_em_andamento` e `tem_terceiro_completo` — computados uma vez no início do
+    node no JS original e reusados por vários blocos depois, inclusive o FAQ_INJECT — entram
+    aqui como parâmetros vindos de `ResultadoIntake` (Parte 1), não recomputados, pra preservar
+    o valor de INÍCIO de turno mesmo depois de guards posteriores mutarem `base`.
 O resto (guards de criação de consulta, cancelamento, empacotamento final) fica pra próximas
 fatias — cada uma seguindo o mesmo padrão de port fiel + testes.
 
@@ -4140,3 +4150,367 @@ def processar_menu_unidade_medico(
                 )
 
     return ResultadoParte8(base=base, intencao_rapida=intencao_rapida, rota_agente=rota_agente)
+
+
+# ---------------------------------------------------------------------------------------------
+# PARTE 9 (linhas 3470-3689)
+# ---------------------------------------------------------------------------------------------
+
+def _norm_nome_livre(s: str) -> str:
+    """Normalização de texto livre pra match de nome: sem acento, minúsculo, pontuação de
+    borda virada espaço, espaços colapsados. Usada por 3 guards distintos no JS original
+    (mesma cadeia de replace, copiada 3x) — FIX_59087, FIX_UNIDADE_TEXTO_OU_INVALIDA (Parte 8)
+    e FIX_NOME_INJECT_TITULAR."""
+    t = _strip_accents(s).lower()
+    t = re.sub(r"[.,!?;:]+", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+_FAQ_PATTERNS = (
+    ("EST", ("estacion", "valet", "deixar o carro", "parar o carro", "onde deixo o carro")),
+    ("RETORNO", (
+        "como funciona o retorno", "tem retorno", "retorno incluso", "retorno esta incluso", "retorno gratis",
+        "retorno gratuito", "valor do retorno", "preco do retorno", "custa o retorno", "custa retorno",
+        "cobra retorno", "retorno e cobrado", "retorno pago", "direito a retorno",
+    )),
+    ("CONV", (
+        "convenio", "convênio", "plano de saude", "planos de saude", "aceita plano", "qual plano",
+        "quais plano", "cobertura", "carteirinha", "trabalham com", "pelo plano", "atende plano",
+        "aceita o plano", "atende o plano", "atendem o plano",
+    )),
+    ("PART", (
+        "valor", "preco", "preço", "custa", "quanto fica", "quanto e", "quanto sai", "particular",
+        "forma de pagamento", "formas de pagamento", "aceita pix", "aceita cartao", "parcela",
+    )),
+    ("END", (
+        "endereco", "endereço", "onde fica", "onde e a clinica", "onde e o consultorio", "localiza",
+        "como chego", "como chegar", "qual a rua", "qual rua", "aonde fica", "fica aonde", "fica onde",
+        "qual bairro", "passa o local", "manda o local", "qual o local", "qual e o local", "local da clinica",
+        "local da consulta", "local da unidade", "local de atendimento",
+    )),
+    ("HOR", (
+        "horario de funcionamento", "horario de atendimento", "horario da clinica", "horarios de funcionamento",
+        "que horas abre", "que horas fecha", "que horas funciona", "que horas atende", "ate que horas",
+        "abre que horas", "fecha que horas", "funciona ate", "dias de funcionamento", "expediente",
+        "atende sabado", "atendem sabado", "atende no sabado", "atendem no sabado", "atende aos sabados",
+        "atendem aos sabados", "abre sabado", "abre no sabado", "abrem sabado", "abrem no sabado",
+        "funciona sabado", "funciona no sabado", "funcionam sabado", "trabalha sabado", "trabalham sabado",
+        "trabalha no sabado", "trabalham no sabado", "sabado atende", "sabado abre", "sabado funciona",
+        "atende domingo", "atendem domingo", "atende no domingo", "atendem no domingo", "abre domingo",
+        "abre no domingo", "fim de semana", "final de semana", "feriado", "atendem hoje", "atende hoje",
+        "estao atendendo",
+    )),
+    ("OUVIDO", (
+        "limpeza de ouvido", "limpeza no ouvido", "limpar o ouvido", "limpar ouvido", "lavagem de ouvido",
+        "lavagem no ouvido", "lavar o ouvido", "cera do ouvido", "cera no ouvido", "tirar cera",
+        "remover cera", "cerume",
+    )),
+    ("CRIANCA", (
+        "atende crianca", "atendem crianca", "atende bebe", "atendem bebe", "consulta infantil",
+        "atendimento infantil", "pediatrico", "idade minima", "a partir de que idade", "a partir de qual idade",
+        "qual idade atende", "atende idoso", "atendem idoso", "atende adulto", "atendem adulto",
+        "todas as idades", "qualquer idade", "ate que idade",
+    )),
+    ("CIRURGIA", ("cirurgi", "operacao", "desvio de septo", "rinoplastia")),
+    ("EXAME", (
+        "raio x", "raio-x", "raiox", "exame", "audiometria", "tomografia", "ressonancia", "ultrassom",
+        "teste da orelhinha", "orelhinha", " bera", " peate", "otoacustic",
+    )),
+    ("ESPEC", (
+        "o que vcs atendem", "o que voces atendem", "o que atendem", "atendem o que", "especialidade",
+        "o que vcs fazem", "o que voces fazem", "quais servicos", "que servicos", "tipo de consulta",
+        "area de atuacao",
+    )),
+    ("TRATA", (
+        "tratam", "zumbido", "labirintite", "otite", "sinusite", "rinite", "amigdalite", "amigdala",
+        "adenoide", "vertigem", "tontura", "apneia", "ronco", "perda auditiva", "perda de audicao",
+        "dor de ouvido", "dor de garganta", "ouvido entupido", "nariz entupido", "rouquidao", "surdez",
+        "sangra", "epistaxe", "sangue no nariz", "sangue no ouvido",
+    )),
+)
+
+
+@dataclass
+class ResultadoParte9:
+    base: dict
+    intencao_rapida: str
+    rota_agente: int
+
+
+def processar_menu_p3_e_faq(
+    base: dict,
+    texto_usuario: str,
+    intencao_rapida: str,
+    rota_agente: int,
+    ia_output: dict,
+    sessao_era_agenda_com_coleta: bool,
+    tem_identidade_em_andamento: bool,
+    tem_terceiro_completo: bool,
+) -> ResultadoParte9:
+    """Linhas 3470-3689 do JS fonte: FIX_59087 (menu P3 numérico com resposta literal por
+    opção), FIX_NOME_INJECT_TITULAR (pré-identificação de paciente titular entre 2+ cadastrados
+    via fuzzy match) e o bloco FAQ_INJECT (14 categorias, com retomada determinística da
+    coleta/agenda)."""
+
+    # FIX_59087: menu P3 ("1 Primeiro horario / 2 Escolher especialista / 3 Ja tenho medico")
+    sess_coleta_ui_p9 = (
+        base.get("sessao_intencao") == "coleta" or _int(base.get("sessao_rota")) == 2
+        or _int(base.get("sessao_rota")) == 3
+    )
+    identidade_completa_p9 = bool(base.get("coleta_id_tisaude")) or bool(
+        base.get("cpf_dependente") and base.get("nascimento_dependente")
+    )
+    if (
+        rota_agente in (2, 3) and sess_coleta_ui_p9 and base.get("coleta_unidade")
+        and not base.get("coleta_medico") and not base.get("coleta_data") and not base.get("cache_ativo")
+        and identidade_completa_p9 and not ia_output.get("bypass_agente_humano") and _texto_ia_livre(base)
+    ):
+        txt_p3m = _norm_nome_livre(texto_usuario)
+        op_p3m = 0
+        if txt_p3m == "1" or re.search(r"primeiro horario|qualquer um|tanto faz", txt_p3m):
+            op_p3m = 1
+        elif txt_p3m == "2" or re.search(r"escolher especialista|ver os medicos|quais medicos|lista de medicos", txt_p3m):
+            op_p3m = 2
+        elif txt_p3m == "3" or re.search(r"ja tenho medico|tenho preferencia|medico de preferencia", txt_p3m):
+            op_p3m = 3
+        if op_p3m == 1:
+            base["texto_ia"] = (
+                f'[MENU P3 OPCAO 1 (primeiro horario): Setar med="sem preferencia", dt="'
+                f'{base.get("hoje") or base.get("amanha") or ""}", modo=1 no $$$ — os 3 valores OBRIGATORIOS '
+                'neste turno. Responder EXATAMENTE: "Manhã ou tarde? 😊"] ' + texto_usuario
+            )
+        elif op_p3m == 2:
+            base["texto_ia"] = (
+                '[MENU P3 OPCAO 2 (escolher especialista): Setar modo=2, id="" no $$$. Responder EXATAMENTE:\n"'
+                + (base.get("lista_med") or "") + '"\n⛔ Copie TODAS as linhas — NAO corte nem reformule nenhum '
+                'medico.] ' + texto_usuario
+            )
+        elif op_p3m == 3:
+            base["texto_ia"] = (
+                f'[MENU P3 OPCAO 3 (ja tem medico): Setar modo=3, dt="'
+                f'{base.get("hoje") or base.get("amanha") or ""}" no $$$. Responder EXATAMENTE: "Qual o nome do '
+                'médico? 😊" ⛔ PROIBIDO mostrar lista de medicos — apenas pergunte e PARE.] ' + texto_usuario
+            )
+
+    # FIX_NOME_INJECT_TITULAR: pré-computar identificação de paciente titular (2+ pacientes)
+    pacs_nit = base.get("pacientes") or []
+    txt_nome_chk_p9 = _norm_nome_livre(texto_usuario)
+    eh_nome_paciente_p9 = False
+    if isinstance(pacs_nit, list):
+        for p in pacs_nit:
+            pn = _strip_accents(p.get("nome") or "").lower()
+            fn = pn.split(" ")[0] if pn else ""
+            if pn and (txt_nome_chk_p9 == pn or txt_nome_chk_p9 == fn):
+                eh_nome_paciente_p9 = True
+                break
+
+    if (
+        len(pacs_nit) >= 2 and rota_agente == 2 and not base.get("coleta_unidade")
+        and (not base.get("nome_dependente") or eh_nome_paciente_p9)
+    ):
+        txt_nit = txt_nome_chk_p9
+        matched = None
+        for p in pacs_nit:
+            nome_nit = _strip_accents(p.get("nome") or "").lower()
+            if not nome_nit:
+                continue
+            if txt_nit == nome_nit or nome_nit in txt_nit or txt_nit in nome_nit:
+                matched = p
+                break
+            if abs(len(txt_nit) - len(nome_nit)) <= 2 and len(txt_nit) >= 3 and _levenshtein(txt_nit, nome_nit) <= 2:
+                matched = p
+                break
+        if matched:
+            d = matched.get("nome") or ""
+            c = matched.get("cpf") or ""
+            n = matched.get("nascimento") or ""
+            base["nome_dependente"] = d
+            base["cpf_dependente"] = c
+            base["nascimento_dependente"] = n
+            base["texto_ia"] = (
+                f'[PACIENTE IDENTIFICADO: {d} | CPF: {c} | NASC: {n}] Use d="{d}", c="{c}", n="{n}" no $$$. NAO '
+                'peca CPF. Pergunte a unidade: "Temos dois enderecos de atendimento, qual a melhor unidade para '
+                'voce? 1 Vila Olimpia 2 Tatupe" ' + (base.get("texto_ia") or "")
+            )
+
+    # FAQ_INJECT: detecta perguntas FAQ mid-flow e injeta resposta determinística
+    msg_faq = _norm(texto_usuario)
+    faq_tag = ""
+    for tag, keys in _FAQ_PATTERNS:
+        if any(k in msg_faq for k in keys):
+            faq_tag = tag
+            break
+
+    # LOTE FAQ 2b: sintoma/crianca/cirurgia/espec com verbo de acao na msg = PEDIDO, nao pergunta
+    if faq_tag in ("TRATA", "CRIANCA", "CIRURGIA", "ESPEC") and re.search(
+        r"agendar|marcar|remarcar|reagendar|cancelar|desmarcar|confirmar|encaix", msg_faq
+    ):
+        faq_tag = ""
+
+    # FIX_63267: convenio aceito citado junto com verbo de agendar = PEDIDO, injeta conv direto
+    if (
+        faq_tag == "CONV"
+        and re.search(r"agendar|marcar|remarcar|reagendar|encaix|consulta", msg_faq)
+        and re.search(r"porto|itau|omint|bradesco", msg_faq)
+        and not re.search(r"quais|aceita|atendem|cobre|trabalham com", msg_faq)
+    ):
+        faq_tag = ""
+        conv_faq = "Porto Seguro" if re.search(r"porto", msg_faq) else ("Itaú" if re.search(r"itau", msg_faq) else "")
+        if (
+            conv_faq and _texto_ia_livre(base) and not ia_output.get("bypass_agente_humano")
+            and not (base.get("coleta_convenio") or "").strip()
+        ):
+            base["texto_ia"] = (
+                f'[AGENDAMENTO COM CONVENIO INFORMADO: paciente pediu para MARCAR e ja informou o convenio '
+                f'{conv_faq} (aceito). Setar conv="{conv_faq}" no $$$. ⛔ NAO envie a lista de convenios. ⛔ NAO '
+                'pergunte convenio depois. Se a msg citar medico da casa, registre em med no $$$. Conduza o '
+                'fluxo normal do passo atual — se identidade vazia, pergunte: "A consulta será para você ou '
+                'para outra pessoa? 😊"] ' + (base.get("texto_ia") or "")
+            )
+
+    # Durante agenda ativa, CONV já é tratado pelo bloco [CONVENIO GENERICO] — suprimir FAQ
+    if faq_tag == "CONV" and sessao_era_agenda_com_coleta:
+        faq_tag = ""
+
+    # FIX_FAQ_NAO_ATROPELA: convencao primeira-tag-vence
+    if faq_tag and (ia_output.get("bypass_agente_humano") or not _texto_ia_livre(base)):
+        faq_tag = ""
+
+    if faq_tag:
+        faq_resp = ""
+        if faq_tag == "CONV":
+            faq_resp = (
+                "[FAQ] A Oto-SP atende os seguintes convênios:\n➡️ Itaú\n➡️ Omint\n➡️ Porto Seguro\n➡️ Bradesco "
+                "— apenas na Unidade Vila Olímpia\n\nNão encontrou o seu? Atendemos também como particular:\n💰 "
+                "R$ 600,00 no débito ou crédito à vista\n💰 R$ 570,00 via PIX (5% de desconto)\n✔️ Incluso 1 "
+                "retorno em até 30 dias 😊"
+            )
+        elif faq_tag == "PART":
+            faq_resp = (
+                "[FAQ] Informações para agendamento Consulta no Particular:\n\n✔️ Incluso 1 retorno em até 30 "
+                "dias\n✔️ Procedimentos inclusos no valor:\n- Vídeo-endoscopia naso-sinusal\n- Vídeo-faringo-"
+                "laringoscopia\n- Nasofibrolaringoscopia\n- Cerúmen-remoção (bilateral)\n📌 Formas de pagamento:\n"
+                "- R$ 600,00 no débito ou crédito à vista\n- R$ 570,00 via PIX (5% de desconto)\nSe tiver "
+                "qualquer dúvida, estamos à disposição! 😊"
+            )
+        elif faq_tag == "END":
+            unid_end_faq = _norm(base.get("coleta_unidade") or "")
+            if "tatuape" in unid_end_faq:
+                faq_resp = (
+                    "[FAQ] O endereço da unidade Tatuapé é:\n📍 Rua Soriano de Sousa, 189 - Tatuapé, 1° Andar, "
+                    "sala 14. 😊"
+                )
+            elif "olimpia" in unid_end_faq:
+                faq_resp = (
+                    "[FAQ] O endereço da unidade Vila Olímpia é:\n📍 Rua Alvorada, 1289 - Vila Olímpia, "
+                    "Condomínio Vila Olímpia Prime Office, 15°Andar - sala 1508. 😊"
+                )
+            else:
+                faq_resp = (
+                    "[FAQ] Nossos endereços:\n\n📍 Vila Olímpia — Rua Alvorada, 1289 - Vila Olímpia, Condomínio "
+                    "Vila Olímpia Prime Office, 15°Andar - sala 1508\n📍 Tatuapé — Rua Soriano de Sousa, 189 - "
+                    "Tatuapé, 1° Andar, sala 14.\n\nQual unidade é melhor para você? 😊"
+                )
+        elif faq_tag == "HOR":
+            faq_resp = "[FAQ] Nosso horário de atendimento é de segunda a sexta, das 8h às 18h. 😊"
+        elif faq_tag == "EST":
+            faq_resp = (
+                "[FAQ] Sim! As duas unidades têm estacionamento no próprio prédio 🚗\nO estacionamento é "
+                "particular — pago à parte, direto com o prédio. 😊"
+            )
+        elif faq_tag == "OUVIDO":
+            faq_resp = (
+                "[FAQ] Sim! 😊 A limpeza de ouvido (remoção de cerúmen) é feita pelo próprio médico durante a "
+                "consulta, nas duas unidades.\nNo particular, ela já está inclusa no valor da consulta.\nPosso "
+                "te ajudar a agendar? 😊"
+            )
+        elif faq_tag == "CRIANCA":
+            faq_resp = (
+                "[FAQ] Sim! Atendemos pacientes de todas as idades — crianças, adultos e idosos 😊 Posso te "
+                "ajudar a agendar uma consulta?"
+            )
+        elif faq_tag == "CIRURGIA":
+            faq_resp = (
+                "[FAQ] Sim! Nossos médicos realizam cirurgias quando há indicação 😊\nO primeiro passo é uma "
+                "consulta de avaliação — o médico examina e, se necessário, indica o procedimento.\nPosso te "
+                "ajudar a agendar essa avaliação? 😊"
+            )
+        elif faq_tag == "RETORNO":
+            faq_resp = (
+                "[FAQ] No particular, a consulta já inclui 1 retorno em até 30 dias 😊\nPelo convênio as regras "
+                "variam — se quiser, te passo para um atendente confirmar as condições do seu plano!"
+            )
+        elif faq_tag == "ESPEC":
+            faq_resp = (
+                "[FAQ] Somos especializados em otorrinolaringologia — cuidamos de tudo de ouvido, nariz e "
+                "garganta: zumbido, labirintite, tontura, otites, sinusite, rinite, ronco, apneia e mais 😊\n"
+                "Posso te ajudar a agendar uma avaliação?"
+            )
+        elif faq_tag == "TRATA":
+            faq_resp = (
+                "[FAQ] Sim! 😊 Somos especializados em otorrinolaringologia — cuidamos de tudo de ouvido, nariz "
+                "e garganta: zumbido, labirintite, tontura, otites, sinusite, rinite, ronco, apneia e mais.\n"
+                "Posso te ajudar a agendar uma avaliação? 😊"
+            )
+        elif faq_tag == "EXAME":
+            faq_resp = (
+                "[FAQ] Na Oto-SP fazemos consultas de otorrinolaringologia, e durante a consulta o médico pode "
+                "realizar estes procedimentos (inclusos no valor, no particular):\n- Vídeo-endoscopia "
+                "naso-sinusal\n- Vídeo-faringo-laringoscopia\n- Nasofibrolaringoscopia\n- Remoção de cerúmen "
+                "(bilateral)\nPara outros exames, como raio-x, posso te passar para uma atendente confirmar! 😊"
+            )
+
+        if faq_resp:
+            faq_retomada = ""
+            if sessao_era_agenda_com_coleta and tem_identidade_em_andamento:
+                nome_ref = (base.get("nome_dependente") or "o paciente").strip()
+                campo_pend = (
+                    f'CPF de {nome_ref}' if not (base.get("cpf_dependente") or "").strip()
+                    else f'data de nascimento de {nome_ref}'
+                )
+                faq_retomada = (
+                    '\n\n[RESPOSTA OBRIGATORIA: envie LITERALMENTE todo o texto do bloco [FAQ] acima (sem '
+                    'resumir, sem cortar) e, na MESMA mensagem, ao FINAL, acrescente em nova linha: "Deseja '
+                    f'continuar com o agendamento? Se sim, me informe o {campo_pend}." ⛔ NAO envie so a '
+                    'pergunta — o texto do FAQ DEVE vir antes. ⛔ NAO avance para proximo campo sem confirmar.]'
+                )
+            elif tem_terceiro_completo and sessao_era_agenda_com_coleta and not base.get("coleta_unidade"):
+                nome_ref = (base.get("nome_dependente") or "o paciente").strip()
+                faq_retomada = (
+                    '\n\n[RESPOSTA OBRIGATORIA: envie LITERALMENTE todo o texto do bloco [FAQ] acima (sem '
+                    'resumir, sem cortar) e, na MESMA mensagem, ao FINAL, acrescente em nova linha: "Deseja '
+                    f'continuar com o agendamento para {nome_ref}?" ⛔ NAO envie so a pergunta — o texto do FAQ '
+                    'DEVE vir antes. Proximo passo apos confirmar: perguntar unidade/data/periodo (P2).]'
+                )
+            elif sessao_era_agenda_com_coleta:
+                faq_retomada = (
+                    '\n\n[RESPOSTA OBRIGATORIA: envie LITERALMENTE todo o texto do bloco [FAQ] acima (sem '
+                    'resumir, sem cortar) e, na MESMA mensagem, ao FINAL, acrescente em nova linha UMA UNICA '
+                    'pergunta que ja retoma a coleta do ponto onde parou (consulte o ESTADO SALVO — unidade/'
+                    'data/periodo/convenio/medico), no formato: "Deseja continuar com o agendamento? Se sim, '
+                    '[proxima pergunta da coleta]". Ex: "Deseja continuar com o agendamento? Se sim, a consulta '
+                    'será Particular ou Convênio? 😊". ⛔ NAO faca duas perguntas separadas ("Deseja '
+                    'continuar...?" numa linha e outra pergunta depois). ⛔ NAO envie so a pergunta — o texto do '
+                    'FAQ DEVE vir antes. ⛔ NAO reinicie o agendamento nem repita etapas ja preenchidas.]'
+                )
+            elif _int(base.get("sessao_rota")) >= 4 or base.get("sessao_intencao") in (
+                "navegacao", "confirmacao", "agenda", "execucao",
+            ):
+                faq_retomada = (
+                    '\n\n[RESPOSTA OBRIGATORIA: envie LITERALMENTE todo o texto do bloco [FAQ] acima (sem '
+                    'resumir, sem cortar) e, na MESMA mensagem, ao FINAL, acrescente em nova linha UMA UNICA '
+                    'pergunta retomando a agenda do ponto onde parou, no formato: "Deseja continuar com o '
+                    'agendamento? Se sim, qual horário prefere? 😊" (use a pergunta pendente real — escolha de '
+                    'horario ja exibido, confirmacao etc). ⛔ NAO faca duas perguntas separadas. ⛔ NAO envie so '
+                    'a pergunta — o FAQ DEVE vir antes. ⛔ NAO chame tools neste turno.]'
+                )
+            else:
+                faq_retomada = (
+                    '\n\n[RESPOSTA OBRIGATORIA: envie LITERALMENTE todo o texto do bloco [FAQ] acima (sem '
+                    'resumir, sem cortar, sem reformular e SEM acrescentar perguntas proprias). Pode encerrar '
+                    'com: "Posso te ajudar a agendar? 😊"]'
+                )
+            base["texto_ia"] = faq_resp + faq_retomada + f'\n\n[Mensagem original: {texto_usuario}]'
+
+    return ResultadoParte9(base=base, intencao_rapida=intencao_rapida, rota_agente=rota_agente)
