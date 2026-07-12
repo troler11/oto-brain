@@ -108,13 +108,16 @@ def test_carregar_prompt_resolve_tokens_regras_clinica():
 # ---------- despachar_turno ----------
 
 def test_despachar_turno_retorna_none_pra_rota_5():
-    assert despachar_turno(_resultado(rota_agente=5), []) is None
+    assert despachar_turno(_resultado(rota_agente=5), [], base_mc={}) is None
 
 
 def test_despachar_turno_chama_agente_certo_e_retorna_par():
     esperado = RespostaAgente(mensagem="ok", estado=EstadoConsulta(i="triagem"))
     client = _mock_client(esperado)
-    resultado = despachar_turno(_resultado(rota_agente=0), [{"role": "user", "content": "oi"}], client=client)
+    resultado = despachar_turno(
+        _resultado(rota_agente=0), [{"role": "user", "content": "oi"}], base_mc={}, client=client,
+    )
     assert resultado == ("triagem", esperado)
     kwargs = client.beta.chat.completions.parse.call_args.kwargs
     assert "FASE3_STRUCTURED_OUTPUT" in kwargs["messages"][0]["content"]
+    assert "{{" not in kwargs["messages"][0]["content"]

@@ -33,6 +33,7 @@ from openai import OpenAI
 from app.agentes import RespostaAgente, chamar_agente
 from app.er import ResultadoER
 from app.regras_clinica import aplicar_regras
+from app.template_engine import renderizar
 
 PASTA_PROMPTS = Path(__file__).resolve().parent.parent / "prompts"
 
@@ -89,16 +90,24 @@ def despachar_turno(
     resultado: ResultadoER,
     mensagens: list[dict],
     *,
+    base_mc: dict,
     n_pacientes: int = 0,
     client: OpenAI | None = None,
 ) -> tuple[str, RespostaAgente] | None:
-    """Escolhe o agente pro turno e chama a OpenAI com o prompt correspondente. Retorna
-    `(agente, resposta)`, ou `None` se a rota é determinística (rota_agente == 5 — ver
-    `app.formatar_verificar_confirmar`, que quem chama deve invocar nesse caso em vez desta
-    função)."""
+    """Escolhe o agente pro turno, resolve as expressões `{{ ... }}` do prompt (`app.
+    template_engine`, `$json` = `resultado.base`, `$('Montar Contexto')` = `base_mc`) e chama
+    a OpenAI. Retorna `(agente, resposta)`, ou `None` se a rota é determinística
+    (rota_agente == 5 — ver `app.formatar_verificar_confirmar`, que quem chama deve invocar
+    nesse caso em vez desta função).
+
+    `base_mc` é o output ORIGINAL de `app.montar_contexto.processar()`, ainda não mutado pelo
+    Extrair Rota — é o que os refs `$('Montar Contexto')...` dos prompts esperam. Na rota=4
+    (agenda), `resultado.base` já deve vir enriquecido por `app.injetar_contexto_agendamento` +
+    `app.preparar_input_agenda` antes de chegar aqui — fiação de quem monta o pipeline
+    completo, não desta função."""
     agente = escolher_agente(resultado, n_pacientes)
     if agente is None:
         return None
-    prompt = carregar_prompt(agente)
+    prompt = renderizar(carregar_prompt(agente), base_mc, resultado.base)
     resposta = chamar_agente(prompt, mensagens, client=client)
     return agente, resposta
