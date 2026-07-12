@@ -5,7 +5,12 @@ Testes do port de Formatar Verificar Confirmar (app/formatar_verificar_confirmar
 
 import json
 
-from app.formatar_verificar_confirmar import processar
+from app.formatar_verificar_confirmar import (
+    formatar_escolher_titular,
+    formatar_resposta_confirmar,
+    preparar_confirmar,
+    processar,
+)
 
 C1 = {"id": "1", "dataBR": "15/07/2026", "hora": "09:00", "medico": "Dra. Giseli Rebechi", "status_id": 1, "status_nome": "pendente"}
 C2 = {"id": "2", "dataBR": "16/07/2026", "hora": "14:00", "medico": "Dr. Elias Lobo Braga", "status_id": 1, "status_nome": "pendente"}
@@ -109,3 +114,58 @@ def test_cf_comeca_em_1_na_primeira_lista():
 def test_cf_zero_fora_da_lista():
     r = processar({"consultas": [C1]}, {}, 0)
     assert _bloco(r["output"])["cf"] == 0
+
+
+# ---------- preparar_confirmar ----------
+
+def test_preparar_confirmar_caminho_auto():
+    r = preparar_confirmar({"auto_confirmar": True, "id_agendamento": "42"}, {"coleta_id_agendamento": "99"})
+    assert r["id_agendamento"] == "42"
+
+
+def test_preparar_confirmar_caminho_legado():
+    r = preparar_confirmar({"auto_confirmar": False}, {"coleta_id_agendamento": "99"})
+    assert r["id_agendamento"] == "99"
+
+
+def test_preparar_confirmar_sem_nada():
+    r = preparar_confirmar({}, {})
+    assert r["id_agendamento"] == ""
+
+
+# ---------- formatar_escolher_titular ----------
+
+def test_formatar_escolher_titular_lista_numerada():
+    r = formatar_escolher_titular({}, [{"nome": "Lucas Bueno"}, {"nome": "Miguel Bueno"}])
+    assert "1. Lucas Bueno" in r["output"]
+    assert "2. Miguel Bueno" in r["output"]
+    d = _bloco(r["output"])
+    assert d["i"] == "confirmar_presenca_escolher"
+    assert d["cf"] == 1
+
+
+def test_formatar_escolher_titular_sem_nome_usa_titular_n():
+    r = formatar_escolher_titular({}, [{}])
+    assert "1. Titular 1" in r["output"]
+
+
+def test_formatar_escolher_titular_cf_incrementa_na_reexibicao():
+    r = formatar_escolher_titular({"sessao_intencao": "confirmar_presenca_escolher", "coleta_conv_fail": 2}, [{"nome": "A"}])
+    assert _bloco(r["output"])["cf"] == 3
+
+
+# ---------- formatar_resposta_confirmar ----------
+
+def test_formatar_resposta_confirmar_auto_detalhado():
+    r = formatar_resposta_confirmar(
+        {"auto_confirmar": True, "id_agendamento": "1", "consulta_dataBR": "15/07/2026", "consulta_hora": "09:00", "consulta_medico": "Dra. Giseli"},
+        {},
+    )
+    assert "Prontinho! Presença confirmada para o dia 15/07/2026 às 09:00 com Dr(a). Dra. Giseli ✅" in r["output"]
+    assert _bloco(r["output"])["id"] == "1"
+
+
+def test_formatar_resposta_confirmar_legado_curto():
+    r = formatar_resposta_confirmar({"auto_confirmar": False}, {"coleta_id_agendamento": "7"})
+    assert r["output"].startswith("Presença confirmada! ✅ Até logo!")
+    assert _bloco(r["output"])["id"] == "7"

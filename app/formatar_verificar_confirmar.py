@@ -14,6 +14,15 @@ Três inputs: `r` (saída da busca de consultas, `$input.first().json`), `extrai
 (`$('Extrair Rota').first().json` — `_confirma_direto`/`sessao_intencao`/`coleta_conv_fail`) e
 `indice` (`$('Preparar Verificar').first().json.indice` — resposta numérica a uma lista já
 exibida).
+
+Módulo também agrupa 3 nós pequenos do MESMO fluxo "confirmar presença" (DEPLOY não tem
+arquivo `_proposed_` isolado que justifique um módulo próprio pra cada um):
+  - `preparar_confirmar()` — DEPLOY/_proposed_Preparar_Confirmar.js (7 linhas): resolve o
+    `id_agendamento` a passar pro sub-workflow TiSaude (caminho auto vs. legado via sessão).
+  - `formatar_escolher_titular()` — DEPLOY/_proposed_Formatar_Escolher_Titular.js (12 linhas):
+    lista os titulares/pacientes numerados quando há mais de um, pra escolher de quem confirmar.
+  - `formatar_resposta_confirmar()` — DEPLOY/_proposed_Formatar_Resposta_Confirmar.js (15
+    linhas): mensagem final de sucesso, detalhada se veio do auto-confirmar, curta no legado.
 """
 
 from __future__ import annotations
@@ -111,3 +120,51 @@ def processar(r: dict, extrair_rota: dict | None, indice) -> dict:
         separators=(",", ":"), ensure_ascii=False,
     )
     return {"auto_confirmar": False, "output": f"{texto}\n\n{bloco}"}
+
+
+def preparar_confirmar(input_item: dict | None, extrair_rota: dict | None) -> dict:
+    """DEPLOY/_proposed_Preparar_Confirmar.js — resolve o id_agendamento a passar pro
+    sub-workflow TiSaude: caminho auto (id vem do próprio item de Formatar Verificar Confirmar)
+    ou caminho legado (id vem da sessão, via Extrair Rota)."""
+    j = input_item or {}
+    er = extrair_rota or {}
+    id_ = (j.get("id_agendamento") if (j.get("auto_confirmar") and j.get("id_agendamento")) else "") or er.get("coleta_id_agendamento") or ""
+    return {"id_agendamento": str(id_).strip()}
+
+
+def formatar_escolher_titular(extrair_rota: dict | None, pacientes: list[dict] | None) -> dict:
+    """DEPLOY/_proposed_Formatar_Escolher_Titular.js — lista os titulares/pacientes numerados
+    quando há mais de um, pra escolher de quem confirmar a presença. FIX_LOOP_CONFIRMAR: cf
+    conta as exibições (1ª = 1, re-exibição +1) — Extrair Rota transfere pra atendente quando a
+    seleção inválida chega com cf >= 2."""
+    er = extrair_rota or {}
+    pacientes = pacientes or []
+    linhas = "\n".join(f"{i + 1}. {p.get('nome') or f'Titular {i + 1}'}" for i, p in enumerate(pacientes))
+    texto = f"Para quem você quer confirmar a presença? 😊\n{linhas}\n\nResponda com o número."
+    cf = (_parseint_js(er.get("coleta_conv_fail")) + 1) if er.get("sessao_intencao") == "confirmar_presenca_escolher" else 1
+    bloco = "$$$" + json.dumps(
+        {"t": False, "i": "confirmar_presenca_escolher", "d": "", "c": "", "n": "", "conv": "", "id": "", "motivo": "", "cf": cf},
+        separators=(",", ":"), ensure_ascii=False,
+    )
+    return {"output": f"{texto}\n\n{bloco}"}
+
+
+def formatar_resposta_confirmar(formatar_verificar_confirmar_out: dict | None, extrair_rota: dict | None) -> dict:
+    """DEPLOY/_proposed_Formatar_Resposta_Confirmar.js — mensagem final de sucesso: detalhada
+    (data/hora/médico) quando veio do auto-confirmar, curta no caminho legado."""
+    v = formatar_verificar_confirmar_out or {}
+    det = v if v.get("auto_confirmar") else None
+    er = extrair_rota or {}
+    id_ = (det.get("id_agendamento") if det else "") or er.get("coleta_id_agendamento") or ""
+    id_ = str(id_).strip()
+    texto = (
+        f"Prontinho! Presença confirmada para o dia {det['consulta_dataBR']} às {det['consulta_hora']} "
+        f"com Dr(a). {det['consulta_medico']} ✅ Até lá!"
+        if det
+        else "Presença confirmada! ✅ Até logo!"
+    )
+    bloco = "$$$" + json.dumps(
+        {"t": False, "i": "concluido", "d": "", "c": "", "n": "", "conv": "", "id": id_, "motivo": ""},
+        separators=(",", ":"), ensure_ascii=False,
+    )
+    return {"output": f"{texto}\n\n{bloco}"}
