@@ -73,3 +73,36 @@ def test_encaixe_early_guard_ainda_funciona_via_orquestrador():
     r = _run("queria um encaixe pra hoje")
     assert r.intencao_rapida == "humano"
     assert r.motivo_humano == "Paciente pediu encaixe"
+
+
+# ---------- deve_resetar_sessao / shadow_check (FIX_DEVE_RESETAR, fechado 12/07) ----------
+
+def test_shadow_check_bypass_false_quando_nenhum_guard_preia_dispara():
+    r = _run("oi")
+    assert r.shadow_check == {"bypass": False}
+    assert r.deve_resetar_sessao is False
+
+
+def test_shadow_check_bypass_true_no_encaixe_com_match_true():
+    # Triagem Determinística (Pre-IA) detecta "encaix" independentemente (guard duplicado de
+    # propósito — ver app.triagem_deterministica_preia) e concorda com a decisão final do ER:
+    # mesma rota/intenção/bypass_agente_humano.
+    r = _run("queria um encaixe pra hoje")
+    assert r.shadow_check == {
+        "bypass": True,
+        "motivo_regra": "encaixe",
+        "pre_rota_agente": 5,
+        "pre_intencao": "humano",
+        "pre_bypass_humano": True,
+        "final_rota_agente": 5,
+        "final_intencao": "humano",
+        "final_bypass_humano": True,
+        "match": True,
+    }
+
+
+def test_deve_resetar_sessao_true_quando_recusa_cancelamento():
+    b = _base(sessao_intencao="cancelando", sessao_rota=1, nome_dependente="Miguel Bueno")
+    r = _run("não quero cancelar", base=b)
+    assert r.deve_resetar_sessao is True
+    assert r.intencao_rapida == "concluido"

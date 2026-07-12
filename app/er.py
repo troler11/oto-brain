@@ -108,10 +108,10 @@ arquivo cobre, em fatias sucessivas:
     atropelados por guard posterior → força rota=5/humano; bypass armado SEMPRE termina no fluxo
     humano) + nota FIX_65817 (telefone tipo LID do WhatsApp → aviso no motivo pro atendente pedir
     o número). O bloco SHADOW_MODE_PRE_IA (lê o nó n8n "Triagem Determinística (Pre-IA)" ao vivo
-    via `$(...)`) e o empacotamento final (`return [{json:{...base, ...}}]`, incluindo
-    `deve_resetar_sessao` combinando os flags de todas as partes anteriores) NÃO são portados
-    aqui — são fiação do orquestrador (que ainda não existe; ver plano de migração), não guards
-    de roteamento. Isso fecha o port guard-por-guard das 4.774 linhas do Extrair Rota.
+    via `$(...)`) e `deve_resetar_sessao` são fiação do orquestrador `processar()`, não guards
+    desta Parte — ver docstring de `processar()` (fechados 12/07, chamando
+    `app.triagem_deterministica_preia.processar()` no lugar do `$(...)` ao vivo). Isso fecha o
+    port guard-por-guard das 4.774 linhas do Extrair Rota.
 
 Como em app/eif1.py: PORT, não reescrita — ordem dos blocos e regras exatas espelham o JS de
 propósito, pra permitir comparação 1:1 na validação.
@@ -133,6 +133,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 
 from app.text_utils import _cpf_digitos_validos, _norm, _strip_accents
+from app.triagem_deterministica_preia import processar as _processar_triagem_preia
 
 SAUDACOES_PURAS = {
     "oi", "ola", "bom dia", "boa tarde", "boa noite",
@@ -3123,6 +3124,7 @@ class ResultadoParte6:
     base: dict
     intencao_rapida: str
     rota_agente: int
+    deve_recusar_cancel: bool = False
 
 
 def processar_medico_dia_periodo(
@@ -3185,6 +3187,7 @@ def processar_medico_dia_periodo(
             base["texto_ia"] = tag_base_c + ' ⛔ NAO reliste as consultas. Continue o fluxo de onde parou.] ' + (base.get("texto_ia") or texto_usuario)
 
     # FIX_RECUSA_CANCELAMENTO (54141) / FIX_65588
+    deve_recusar_cancel = False
     if rota_agente == 1 and base.get("sessao_intencao") == "cancelando":
         txt_cancel_norm = _strip_accents(texto_usuario)
         recusa_cancel = bool(re.match(
@@ -3202,6 +3205,7 @@ def processar_medico_dia_periodo(
             txt_cancel_norm.lower(),
         ))
         if recusa_cancel:
+            deve_recusar_cancel = True
             intencao_rapida = "concluido"
             base["texto_ia"] = (
                 '[RECUSA CANCELAMENTO: paciente decidiu NAO cancelar. Diga APENAS: "Tudo bem, sua consulta não foi '
@@ -3209,6 +3213,7 @@ def processar_medico_dia_periodo(
                 + (base.get("texto_ia") or "")
             )
         elif ja_resolveu_cancel:
+            deve_recusar_cancel = True
             intencao_rapida = "concluido"
             base["texto_ia"] = (
                 '[ENCERRAMENTO CANCELAMENTO RESOLVIDO: paciente ja resolveu por conta propria e esta se despedindo. '
@@ -3397,7 +3402,10 @@ def processar_medico_dia_periodo(
                         + (base.get("texto_ia") or texto_usuario)
                     )
 
-    return ResultadoParte6(base=base, intencao_rapida=intencao_rapida, rota_agente=rota_agente)
+    return ResultadoParte6(
+        base=base, intencao_rapida=intencao_rapida, rota_agente=rota_agente,
+        deve_recusar_cancel=deve_recusar_cancel,
+    )
 
 
 # ============================================================================
@@ -6098,6 +6106,8 @@ class ResultadoER:
     motivo_humano: str | None = None
     deve_resetar_agradecimento: bool = False
     deve_encerrar_triagem: bool = False
+    deve_resetar_sessao: bool = False
+    shadow_check: dict = field(default_factory=lambda: {"bypass": False})
 
 
 def processar(
@@ -6119,11 +6129,15 @@ def processar(
     funções puras do `base` já mutado, então recomputar é equivalente e evita inchar os
     dataclasses das Partes 3/6 só para o orquestrador.
 
-    NÃO computa `deve_resetar_sessao` nem o `_shadow_check` do node original: o primeiro depende
-    de `_deveRecusarCancel` (variável interna da Parte 6, ainda não exposta) e o segundo lê ao
-    vivo o nó n8n "Triagem Determinística (Pre-IA)", que não existe fora do n8n. Isso é
-    fiação de Fase 2 (cutover), não lógica de roteamento — ver plano de migração.
+    `deve_resetar_sessao` e `shadow_check` (FIX_DEVE_RESETAR / shadow do JS original): fechados
+    12/07 — `deve_recusar_cancel` (Parte 6) foi exposto no dataclass, e `_preRota` (que o JS lê
+    ao vivo do nó paralelo "Triagem Determinística (Pre-IA)") é computado aqui chamando
+    `app.triagem_deterministica_preia.processar()` com o MESMO `base`/`mensagem_agrupada` de
+    entrada, ANTES de qualquer parte mutar `base` — replica exatamente o que o node n8n paralelo
+    recebe (o mesmo estado inicial do turno).
     """
+    pre_rota = _processar_triagem_preia(base, mensagem_agrupada)["_preRota"]
+
     r1 = processar_intake(base, mensagem_agrupada, ai_agent_json, whatsapp_info, has_media)
     base, texto_usuario, ia_output = r1.base, r1.texto_usuario, r1.ia_output
     intencao_rapida, rota_agente = r1.intencao_rapida, r1.rota_agente
@@ -6205,6 +6219,33 @@ def processar(
     r14 = processar_encerramento_e_pedido_humano(base, texto_usuario, intencao_rapida, rota_agente, ia_output)
     base, intencao_rapida, rota_agente = r14.base, r14.intencao_rapida, r14.rota_agente
 
+    # FIX_DEVE_RESETAR
+    deve_resetar_sessao = (
+        r13.deve_resetar_agradecimento
+        or r14.deve_encerrar_triagem
+        or r6.deve_recusar_cancel
+        or (r1.eh_mensagem_informativa and not r1.sessao_era_agenda_com_coleta and not r1.eh_sessao_nova)
+    )
+
+    if pre_rota.get("bypass"):
+        shadow_check = {
+            "bypass": True,
+            "motivo_regra": pre_rota.get("motivo_regra"),
+            "pre_rota_agente": pre_rota.get("rota_agente"),
+            "pre_intencao": pre_rota.get("intencao_rapida"),
+            "pre_bypass_humano": bool(pre_rota.get("bypass_agente_humano")),
+            "final_rota_agente": rota_agente,
+            "final_intencao": intencao_rapida,
+            "final_bypass_humano": bool(ia_output.get("bypass_agente_humano")),
+            "match": (
+                (pre_rota.get("rota_agente") is None or pre_rota.get("rota_agente") == rota_agente)
+                and (pre_rota.get("intencao_rapida") is None or pre_rota.get("intencao_rapida") == intencao_rapida)
+                and (bool(pre_rota.get("bypass_agente_humano")) == bool(ia_output.get("bypass_agente_humano")))
+            ),
+        }
+    else:
+        shadow_check = {"bypass": False}
+
     return ResultadoER(
         base=base,
         intencao_rapida=intencao_rapida,
@@ -6215,4 +6256,6 @@ def processar(
         motivo_humano=base.get("motivo_humano"),
         deve_resetar_agradecimento=r13.deve_resetar_agradecimento,
         deve_encerrar_triagem=r14.deve_encerrar_triagem,
+        deve_resetar_sessao=deve_resetar_sessao,
+        shadow_check=shadow_check,
     )

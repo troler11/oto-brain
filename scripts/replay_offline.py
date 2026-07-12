@@ -46,8 +46,12 @@ from app.state_validator import normalizar_ds, validar_estado  # noqa: E402
 CAMPOS_ER_COMPARADOS = (
     "intencao_rapida", "rota_agente", "texto_ia", "coleta_unidade", "coleta_medico",
     "coleta_convenio", "coleta_data", "coleta_periodo", "coleta_dia_semana", "coleta_horario",
-    "coleta_modo", "nome_dependente", "coleta_terceiro",
+    "coleta_modo", "nome_dependente", "coleta_terceiro", "deve_resetar_sessao",
 )
+# `_shadow_check` NÃO entra aqui: depende do nó "Triagem Determinística (Pre-IA)" da mesma
+# execução, que não está em NOS_INTERESSE (scripts/backfill_n8n_executions.py) — precisaria de
+# novo re-backfill pra validar contra gabarito real. `deve_resetar_sessao` já é validável porque
+# é campo direto do JSON gravado pelo nó Extrair Rota (fechado 12/07, ver app/er.py::processar).
 CAMPOS_SV_COMPARADOS = ("sv_result", "sv_reason")
 
 
@@ -72,10 +76,11 @@ def _hoje_do_turno(montar_contexto: dict) -> datetime:
     return datetime.now()
 
 
-def _resultado_er(r_base: dict, intencao_rapida: str, rota_agente: int) -> dict:
+def _resultado_er(r_base: dict, intencao_rapida: str, rota_agente: int, deve_resetar_sessao: bool) -> dict:
     out = dict(r_base)
     out["intencao_rapida"] = intencao_rapida
     out["rota_agente"] = rota_agente
+    out["deve_resetar_sessao"] = deve_resetar_sessao
     return out
 
 
@@ -99,7 +104,7 @@ def replay_turno(row: dict) -> dict | None:
     with hoje_fixado(hoje):
         r = processar(montar_contexto, mensagem_agrupada, ai_agent, whatsapp_info, has_media)
 
-    er_python = _resultado_er(r.base, r.intencao_rapida, r.rota_agente)
+    er_python = _resultado_er(r.base, r.intencao_rapida, r.rota_agente, r.deve_resetar_sessao)
     diffs = {}
     for campo in CAMPOS_ER_COMPARADOS:
         esperado = er_gabarito.get(campo)
