@@ -7,6 +7,7 @@ certo roda com os params certos, não o resultado de uma query real.
 from unittest.mock import MagicMock
 
 from app.db import (
+    carregar_historico_conversa,
     carregar_sessao,
     computar_params_salvar_sessao,
     resetar_sessao,
@@ -46,6 +47,55 @@ def test_carregar_sessao_sem_linha_retorna_none():
     conn, cur = _mock_conn()
     cur.fetchone.return_value = None
     assert carregar_sessao(conn, "5511999999999") is None
+
+
+# ---------- carregar_historico_conversa ----------
+
+def test_carregar_historico_converte_origem_pra_role_e_reordena_cronologico():
+    conn, cur = _mock_conn()
+    # fetchall vem em ordem DESC (mais recente primeiro) — função deve inverter pra cronológico
+    cur.fetchall.return_value = [
+        {"texto": "Consulta agendada!", "origem": "ia_ou_recepcao", "data": "3"},
+        {"texto": "amanhã de manhã", "origem": "paciente", "data": "2"},
+        {"texto": "oi", "origem": "paciente", "data": "1"},
+    ]
+    historico = carregar_historico_conversa(conn, "5511999999999")
+    assert historico == [
+        {"role": "user", "content": "oi"},
+        {"role": "user", "content": "amanhã de manhã"},
+        {"role": "assistant", "content": "Consulta agendada!"},
+    ]
+    sql, params = cur.execute.call_args.args
+    assert "FROM chat_limpo" in sql
+    assert "excluido_em IS NULL" in sql
+    assert params == {"telefone": "5511999999999", "limite": 20}
+
+
+def test_carregar_historico_respeita_limite_customizado():
+    conn, cur = _mock_conn()
+    cur.fetchall.return_value = []
+    carregar_historico_conversa(conn, "5511999999999", limite=5)
+    assert cur.execute.call_args.args[1]["limite"] == 5
+
+
+def test_carregar_historico_ignora_mensagem_vazia():
+    conn, cur = _mock_conn()
+    cur.fetchall.return_value = [
+        {"texto": "", "origem": "paciente", "data": "1"},
+        {"texto": None, "origem": "ia_ou_recepcao", "data": "2"},
+        {"texto": "oi", "origem": "paciente", "data": "3"},
+    ]
+    assert carregar_historico_conversa(conn, "5511999999999") == [{"role": "user", "content": "oi"}]
+
+
+def test_carregar_historico_humano_via_enviado_por_vira_assistant():
+    conn, cur = _mock_conn()
+    cur.fetchall.return_value = [
+        {"texto": "Vou te conectar", "origem": "ia_ou_recepcao", "data": "1", "enviado_por": "Lucas Bueno"},
+    ]
+    assert carregar_historico_conversa(conn, "5511999999999") == [
+        {"role": "assistant", "content": "Vou te conectar"},
+    ]
 
 
 # ---------- salvar_coleta_steps ----------

@@ -132,6 +132,39 @@ def carregar_sessao(conn: psycopg.Connection, telefone: str) -> dict | None:
         return cur.fetchone()
 
 
+def _historico_para_mensagens(rows: list[dict]) -> list[dict]:
+    """Converte linhas de `chat_limpo` (ordem cronológica, mais antiga primeiro) pro formato
+    `[{"role": "user"|"assistant", "content": ...}, ...]` que `app.agentes.chamar_agente`
+    espera — `origem='paciente'` -> `user`, qualquer outra coisa (`ia_ou_recepcao`, inclusive
+    quando um humano assumiu via `enviado_por`) -> `assistant` (é o que foi dito AO paciente,
+    não importa se foi o bot ou um atendente)."""
+    return [
+        {"role": "user" if row["origem"] == "paciente" else "assistant", "content": row["texto"]}
+        for row in rows
+        if (row.get("texto") or "").strip()
+    ]
+
+
+def carregar_historico_conversa(conn: psycopg.Connection, telefone: str, limite: int = 20) -> list[dict]:
+    """Últimas `limite` mensagens de `chat_limpo` pro telefone (exclui editadas/excluídas),
+    convertidas pro formato de histórico OpenAI (`app._historico_para_mensagens`). Fonte de
+    conversa pro `/route` (Fase 3) — `chat_limpo` já é gravado ao vivo pelo n8n, mesma tabela
+    usada na mineração de casos (`app.minerar_casos`)."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT texto, origem, data
+            FROM chat_limpo
+            WHERE telefone = %(telefone)s AND excluido_em IS NULL
+            ORDER BY data DESC
+            LIMIT %(limite)s;
+            """,
+            {"telefone": telefone, "limite": limite},
+        )
+        rows = list(reversed(cur.fetchall()))
+    return _historico_para_mensagens(rows)
+
+
 def salvar_coleta_steps(
     conn: psycopg.Connection,
     telefone: str,
