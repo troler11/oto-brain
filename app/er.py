@@ -100,9 +100,18 @@ arquivo cobre, em fatias sucessivas:
     (regex de tolerância a erro de digitação por médico) foi promovido a constante de módulo nesta
     parte — usado aqui E em FIX_OMINT_MENCAO_MEDICO (Parte 11), confirmado byte-a-byte idêntico
     nos dois guards do JS original.
-O resto (guards de encerramento/pedido de humano + empacotamento final da resposta pro n8n,
-incluindo a leitura ao vivo do nó "Triagem Determinística (Pre-IA)" pro shadow-mode) fica pra
-Parte 14 — a última fatia deste port.
+  PARTE 14 (linhas 4663-4740, ÚLTIMA fatia): FIX_ENCERRAMENTO_TRIAGEM (paciente encerra a
+    conversa a partir da triagem → concluído + reset total, senão a sessão fica presa na fila),
+    FIX_64104/DESISTENCIA (paciente vai procurar outro lugar → transfere pra humano em vez de
+    insistir com horários), FIX_PEDIDO_HUMANO (pedido explícito de atendente vence a cascata de
+    proteções de sessão ativa) e o backstop FIX_65731 (bypass humano armado mas rota/intenção
+    atropelados por guard posterior → força rota=5/humano; bypass armado SEMPRE termina no fluxo
+    humano) + nota FIX_65817 (telefone tipo LID do WhatsApp → aviso no motivo pro atendente pedir
+    o número). O bloco SHADOW_MODE_PRE_IA (lê o nó n8n "Triagem Determinística (Pre-IA)" ao vivo
+    via `$(...)`) e o empacotamento final (`return [{json:{...base, ...}}]`, incluindo
+    `deve_resetar_sessao` combinando os flags de todas as partes anteriores) NÃO são portados
+    aqui — são fiação do orquestrador (que ainda não existe; ver plano de migração), não guards
+    de roteamento. Isso fecha o port guard-por-guard das 4.774 linhas do Extrair Rota.
 
 Como em app/eif1.py: PORT, não reescrita — ordem dos blocos e regras exatas espelham o JS de
 propósito, pra permitir comparação 1:1 na validação.
@@ -5929,4 +5938,124 @@ def processar_agradecimento_triagem_multidados(
     return ResultadoParte13(
         base=base, intencao_rapida=intencao_rapida, rota_agente=rota_agente,
         deve_resetar_agradecimento=deve_resetar_agradecimento,
+    )
+
+
+# ---------------------------------------------------------------------------------------------
+# PARTE 14 (linhas 4663-4740) — ÚLTIMA fatia do port guard-por-guard do ER
+# ---------------------------------------------------------------------------------------------
+
+@dataclass
+class ResultadoParte14:
+    base: dict
+    intencao_rapida: str
+    rota_agente: int
+    deve_encerrar_triagem: bool = False
+
+
+def processar_encerramento_e_pedido_humano(
+    base: dict,
+    texto_usuario: str,
+    intencao_rapida: str,
+    rota_agente: int,
+    ia_output: dict,
+) -> ResultadoParte14:
+    """Linhas 4663-4740 do JS fonte: FIX_ENCERRAMENTO_TRIAGEM, FIX_64104/DESISTENCIA,
+    FIX_PEDIDO_HUMANO e o backstop FIX_65731 (bypass humano armado SEMPRE termina no fluxo
+    humano) + FIX_65817 (aviso de telefone tipo LID do WhatsApp no motivo)."""
+
+    deve_encerrar_triagem = False
+
+    # FIX_ENCERRAMENTO_TRIAGEM: paciente encerra a conversa a partir da triagem
+    if base.get("sessao_intencao") == "triagem":
+        txt_enc = _strip_accents(texto_usuario).lower()
+        txt_enc = re.sub(r"[^a-z\s]", " ", txt_enc)
+        txt_enc = re.sub(r"\s+", " ", txt_enc).strip()
+        eh_encerra = (
+            bool(re.match(
+                r"^(n|nao|nao obrigad[ao]|nao precisa|nao precisa mais|nao preciso|nao preciso de mais nada|"
+                r"nao preciso de nada|nao quero mais|nao quero mais nada|so isso|so isso mesmo|era so isso|e "
+                r"so isso|nada mais|mais nada|por enquanto so isso|por enquanto e so|por enquanto nao|nao por "
+                r"enquanto|agora nao|to satisfeit[ao]|estou satisfeit[ao]|tchau|ate logo|ate mais|valeu|"
+                r"obrigad[ao]|muito obrigad[ao]|ok obrigad[ao]|sem mais|pode encerrar|pode finalizar|encerrar|"
+                r"finalizar)$", txt_enc,
+            ))
+            or bool(re.match(
+                r"^(nao preciso|nao quero mais|so isso|era so isso|nada mais|mais nada|sem mais nada)", txt_enc,
+            ))
+        )
+        if eh_encerra:
+            rota_agente = 0
+            intencao_rapida = "concluido"
+            deve_encerrar_triagem = True
+            base["texto_ia"] = (
+                '[ENCERRAMENTO: paciente nao precisa de mais nada. Responda EXATAMENTE: "Tudo bem! Se precisar '
+                'de algo é só chamar. 😊" ⛔ NAO mostre o menu principal. ⛔ NAO pergunte nada. ⛔ NAO ofereça '
+                'atendente.]'
+            )
+
+    # FIX_64104: DESISTENCIA — paciente vai procurar outro lugar
+    txt_ds64 = _norm(texto_usuario)
+    eh_desistencia = (
+        bool(re.search(r"\b(outro lugar|outra clinica|outro consultorio)\b", txt_ds64))
+        and bool(re.search(
+            r"\b(vou|estou|to|tentando|procurando|vendo|ver|tentar|procurar|achei|consegui|encontrei|"
+            r"marquei)\b", txt_ds64,
+        ))
+    ) or bool(re.search(
+        r"\bvou (ter que )?(ver|procurar|tentar|marcar) (com |em )?(um |uma )?(outro|outra) (otorrino|medico|"
+        r"clinica|lugar|profissional)", txt_ds64,
+    )) or bool(re.search(r"\bdesist", txt_ds64)) or bool(
+        re.search(r"\bnao vou (mais )?marcar\b|\bdeixar? pra la\b", txt_ds64)
+    )
+    ctx_ag_ds64 = (
+        rota_agente in (2, 3, 4) or _int(base.get("sessao_rota")) in (2, 3, 4)
+        or base.get("sessao_intencao") in ("coleta", "agenda", "navegacao")
+    )
+    if eh_desistencia and ctx_ag_ds64 and not ia_output.get("bypass_agente_humano") and _texto_ia_livre(base):
+        ia_output["bypass_agente_humano"] = True
+        intencao_rapida = "humano"
+        rota_agente = 0
+        base["motivo_humano"] = "Paciente desistindo - vai procurar outro lugar"
+        base["texto_ia"] = (
+            '[TRANSFERIR HUMANO: paciente esta DESISTINDO do agendamento (vai procurar outro lugar/'
+            'profissional). Responder EXATAMENTE: "Entendo! 😊 Vou te passar para um atendente, só um '
+            'instante!" e emitir i="humano", motivo="Paciente desistindo - vai procurar outro lugar". ⛔ NAO '
+            'ofereca horarios. ⛔ NAO repita a agenda. ⛔ NAO pergunte mais nada.] ' + texto_usuario
+        )
+
+    # FIX_PEDIDO_HUMANO: paciente pediu atendente humano explicitamente durante sessao ativa
+    txt_ph = _norm(texto_usuario)
+    pedido_humano = (
+        bool(re.search(r"\bfalar com (um )?(atendente|pessoa|humano|alguem)\b", txt_ph))
+        or bool(re.search(r"\b(quero|preciso|queria|pode|poderia|seria possivel|tem como).{0,20}\batendente\b", txt_ph))
+        or bool(re.search(r"\batendente (por favor|agora)\b", txt_ph))
+        or bool(re.match(r"^(atendente|humano|atendimento humano|uma pessoa)[!.,?\s]*$", txt_ph.strip()))
+    )
+    if pedido_humano and not ia_output.get("bypass_agente_humano"):
+        rota_agente = 0
+        intencao_rapida = "humano"
+        ia_output["bypass_agente_humano"] = True
+        base["motivo_humano"] = "Paciente pediu atendente explicitamente durante sessao ativa"
+        base["texto_ia"] = (
+            '[TRANSFERIR HUMANO: paciente pediu atendente durante sessao ativa. Responder EXATAMENTE: "Certo! '
+            'Vou te transferir para um atendente agora. :-)" e emitir i="humano", motivo="Pediu atendente". '
+            'NAO siga o fluxo de agenda/coleta.] ' + texto_usuario
+        )
+
+    # FIX_65731 (backstop): bypass humano armado SEMPRE termina no fluxo humano
+    if ia_output.get("bypass_agente_humano") and intencao_rapida != "humano":
+        rota_agente = 5
+        intencao_rapida = "humano"
+
+    # FIX_65817: telefone tipo LID do WhatsApp (15+ digitos) -> aviso no motivo pro atendente
+    if ia_output.get("bypass_agente_humano") and len(re.sub(r"\D", "", str(base.get("telefone") or ""))) >= 14:
+        base["motivo_humano"] = (
+            (base.get("motivo_humano") or "Atendimento humano")
+            + " | ATENCAO: telefone nao identificado (WhatsApp LID) — pedir numero ao paciente"
+        )
+
+    return ResultadoParte14(
+        base=base, intencao_rapida=intencao_rapida, rota_agente=rota_agente,
+        deve_encerrar_triagem=deve_encerrar_triagem,
     )
