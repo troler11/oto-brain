@@ -18,19 +18,12 @@ from __future__ import annotations
 
 import json
 import re
-import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
+from app.text_utils import _norm, _strip_accents
 
-def _strip_accents(s: str) -> str:
-    """Equivalente a .normalize('NFD').replace(/[\\u0300-\\u036f]/g, '')."""
-    return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
-
-
-def _norm(s) -> str:
-    """Normalização comum: lowercase, sem acento, trim."""
-    return _strip_accents(str(s or "")).lower().strip()
+__all__ = ["_norm", "_strip_accents"]  # re-exportados, usados por tests/test_eif1.py
 
 
 # FIX_DT_DS_MISMATCH / FIX_CLEAR_FIELDS usam a convenção JS de getDay(): domingo=0.
