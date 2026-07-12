@@ -15,8 +15,13 @@ arquivo cobre, em fatias sucessivas:
     principal da triagem (opções 1-6), ver frase livre, fluxo de confirmar presença (escolher/
     lista/recusou/turno2), atraso, oferta_agendar/oferta_humano, promoção pra rota=4 (agenda),
     backstop de identidade incompleta, histórico do paciente, breadcrumb "outro dia".
-O resto (guards de agenda/coleta detalhados, empacotamento final) fica pra próximas fatias —
-cada uma seguindo o mesmo padrão de port fiel + testes.
+  PARTE 4 (linhas 1615-1945): máquina de sub-rota da agenda (navegação → confirmação →
+    execução) — backtracking/confirmação de horário, "procurar mais pra frente", "mais horário
+    mesmo dia", consumo do "quer ver outro dia" por estado, desistência, FIX_COLETA_PROTECTION,
+    carência de convênio (FIX_67553), gate de convênio (FIX_66512) e gate de email (FIX_59124)
+    na entrada da execução.
+O resto (guards de navegação/cache/troca de médico, guards de criação de consulta, empacotamento
+final) fica pra próximas fatias — cada uma seguindo o mesmo padrão de port fiel + testes.
 
 Como em app/eif1.py: PORT, não reescrita — ordem dos blocos e regras exatas espelham o JS de
 propósito, pra permitir comparação 1:1 na validação.
@@ -34,7 +39,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.text_utils import _cpf_digitos_validos, _norm, _strip_accents
 
@@ -1816,3 +1821,402 @@ def processar_convenio_menu_agenda(
         sub_rota_agenda=sub_rota_agenda,
         esta_em_agenda_ativa=esta_em_agenda_ativa,
     )
+
+
+# ============================================================================
+# PARTE 4 (linhas 1615-1945 do JS): máquina de sub-rota da agenda
+# (navegação → confirmação → execução), carência, gate de convênio/email
+# ============================================================================
+
+_MAPA_CONVENIO = [
+    (re.compile(r"\bporto( seguro)?\b"), "Porto Seguro"),
+    (re.compile(r"\bitau\b"), "Itaú"),
+    (re.compile(r"\bomint\b"), "Omint"),
+    (re.compile(r"\bbradesco\b"), "Bradesco"),
+    (re.compile(r"\bparticular\b"), "Particular"),
+]
+
+
+def _br_data(iso: str) -> str:
+    partes = (iso or "").split("-")
+    return "/".join(reversed(partes)) if len(partes) == 3 else (iso or "")
+
+
+def _add_dias(date_str: str, dias: int) -> str:
+    try:
+        d = datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=dias)
+        return d.strftime("%Y-%m-%d")
+    except ValueError:
+        return ""
+
+
+@dataclass
+class ResultadoParte4:
+    base: dict
+    intencao_rapida: str
+    rota_agente: int
+    sub_rota_agenda: str
+
+
+def processar_sub_rota_agenda(
+    base: dict,
+    texto_usuario: str,
+    intencao_rapida: str,
+    rota_agente: int,
+    ia_output: dict,
+    eh_cancel_real: bool,
+    eh_pergunta_ver: bool,
+    eh_mensagem_informativa: bool,
+    all_coleta_confirmed: bool,
+    esta_em_agenda_ativa: bool,
+    sub_rota_agenda: str,
+) -> ResultadoParte4:
+    txt_norm = _norm(texto_usuario)
+    udi = base.get("ultimo_dia_exibido")
+    if not isinstance(udi, dict):
+        udi = {}
+
+    # FIX_59204: horario+data escolhidos e ainda nao em execucao = confirmacao por definicao
+    if esta_em_agenda_ativa and base.get("coleta_horario") and base.get("coleta_data") and sub_rota_agenda != "execucao":
+        sub_rota_agenda = "confirmacao"
+
+    # Backtracking / FIX_CONFIRMA_DIRETO
+    if sub_rota_agenda == "confirmacao" and _texto_ia_livre(base):
+        quer_voltar = txt_norm.strip() == "n" or bool(re.search(
+            r"outr[oa]|diferente|mudar|nao quero|nao|errado|trocar|voltar|proximo dia|dia seguinte|proxima semana|"
+            r"semana que vem|tem mais (dias?|datas?|horarios?|opcao|opcoes)|\bn consigo\b|\bn posso\b|\bn quero\b|\bn da\b",
+            txt_norm,
+        ))
+        if quer_voltar:
+            sub_rota_agenda = "navegacao"
+            tag_vn = (
+                '[VOLTA NAVEGACAO: paciente rejeitou horário, mostrar opções novamente. Setar h="" e dt="" no $$$ '
+                '— ⛔ NAO ecoe o horario/data rejeitados.] '
+            )
+            pede_dia_vn = bool(re.search(r"\bdias?\b|proximo dia|proxima semana|semana que vem|dia seguinte", txt_norm))
+            if pede_dia_vn and re.match(r"^\d{4}-\d{2}-\d{2}$", base.get("coleta_data") or ""):
+                dt_prox_vn = _add_dias(base["coleta_data"], 1)
+                if re.search(r"proxima semana|semana que vem", txt_norm) and re.match(r"^\d{4}-\d{2}-\d{2}$", base.get("prox_seg") or ""):
+                    dt_prox_vn = base["prox_seg"]
+                if dt_prox_vn:
+                    dt_rej_br = _br_data(base["coleta_data"])
+                    per_txt = f', periodo="{base["coleta_periodo"]}"' if base.get("coleta_periodo") else ""
+                    tag_vn = (
+                        f'[OUTRO DIA APOS REJEICAO: paciente quer OUTRO DIA (nao os horarios de {dt_rej_br}). '
+                        f'⛔ OBRIGATORIO chamar buscar_agenda AGORA com data="{dt_prox_vn}", '
+                        f'unidade="{base.get("coleta_unidade") or ""}", medico="{base.get("coleta_medico") or ""}"'
+                        f'{per_txt} e EXIBIR os dias que a tool retornar. ⛔ NAO repita os horarios de {dt_rej_br}. '
+                        'Setar h="" no $$$.] '
+                    )
+            base["coleta_data"] = ""
+            base["coleta_horario"] = ""
+            base["_clear_pm"] = {**(base.get("_clear_pm") or {}), "dt": 1, "h": 1}
+            base["texto_ia"] = tag_vn + texto_usuario
+        else:
+            txt_conf = txt_norm.strip()
+            eh_conf_positiva = bool(re.match(
+                r"^(s|si|sim|ok|pode|correto|certo|isso|bora|vamos|perfeito|confirmo|confirma|pode ser|ta bom|ta certo|beleza)$",
+                txt_conf,
+            )) or bool(re.search(
+                r"\b(sim|correto|corretos|certo|isso|perfeito|confirmo|confirmado|confirma|confirmar|exato|"
+                r"exatamente|positivo|fechado|combinado|pode confirmar|pode agendar|pode marcar|ta correto|ta certo|"
+                r"esta correto|tudo certo|tudo correto)\b",
+                txt_conf,
+            ))
+            if eh_conf_positiva:
+                sub_rota_agenda = "execucao"
+
+    # FIX_65977c: tag HORARIO NAO VERIFICADO forca navegacao (Agente Confirmacao nao busca)
+    base["_sub_rota_agenda"] = "navegacao" if "[HORARIO NAO VERIFICADO" in (base.get("texto_ia") or "") else sub_rota_agenda
+
+    # FIX_PROCURAR_MAIS_FRENTE
+    if sub_rota_agenda == "navegacao" and base.get("coleta_medico"):
+        txt_pmf = txt_norm
+        udi_raw = base.get("ultimo_dia_exibido")
+        tem_vaga_exibida = bool(udi_raw) and (not isinstance(udi_raw, dict) or len(udi_raw) > 0)
+        eh_proc_mais = (not tem_vaga_exibida and base.get("cache_ativo") and txt_pmf == "3") or bool(
+            re.search(r"mais para frente|mais pra frente|procurar mais|mais adiante|mais para a frente", txt_pmf)
+        )
+        if eh_proc_mais:
+            if base.get("coleta_data") and re.match(r"^\d{4}-\d{2}-\d{2}$", base["coleta_data"]):
+                base_dt_pmf = base["coleta_data"]
+            else:
+                base_dt_pmf = _add_dias(datetime.now().strftime("%Y-%m-%d"), 1)
+            nova_dt_pmf = _add_dias(base_dt_pmf, 20)
+            base["coleta_data"] = nova_dt_pmf
+            per_txt = f', periodo="{base["coleta_periodo"]}"' if base.get("coleta_periodo") else ""
+            base["texto_ia"] = (
+                f'[PROCURAR MAIS PARA FRENTE: paciente quer datas mais adiante. ⛔ OBRIGATORIO chamar buscar_agenda '
+                f'AGORA com data="{nova_dt_pmf}", unidade="{base.get("coleta_unidade") or ""}", '
+                f'medico="{base.get("coleta_medico") or ""}"{per_txt} (mantenha o periodo escolhido) → '
+                'navegar_agenda(ver). Se houver vagas, EXIBA. Se vazio, ofereça outro medico ou atendente. '
+                '⛔ NAO repita o menu "proximos 20 dias" com a mesma data anterior.] ' + texto_usuario
+            )
+
+    # FIX_MAIS_HORARIO_MESMO_DIA
+    if sub_rota_agenda == "navegacao" and udi.get("data"):
+        txt_mh = txt_norm
+        fala_dia_mh = bool(re.search(r"\bdia\b|\bdata\b|semana|amanha|segunda|terca|quarta|quinta|sexta", txt_mh))
+        eh_mais_horario = not fala_dia_mh and (
+            bool(re.search(r"mais hor|outro hor|outros hor|mais opcao|mais opcoes", txt_mh))
+            or txt_mh in ("tem mais", "mais", "tem outro", "tem mais horario", "tem outro horario")
+        )
+        if eh_mais_horario:
+            dt_mh = _br_data(udi["data"])
+            per_mh = f' ({"manhã" if base.get("coleta_periodo") == "manha" else base.get("coleta_periodo")})' if base.get("coleta_periodo") else ""
+            base["texto_ia"] = (
+                f'[MAIS HORARIO MESMO DIA: a busca ja trouxe TODOS os horarios de {dt_mh}. ⛔ NAO avance de dia. '
+                f'⛔ NAO invente horarios. Responder EXATAMENTE: "Esses sao todos os horarios disponiveis para '
+                f'{dt_mh}{per_mh}. Quer ver outro dia? 😊" i="agenda".] ' + texto_usuario
+            )
+            intencao_rapida = "oferecer_outro_dia"
+
+    # FIX_59198: consumo do "Quer ver outro dia?" por ESTADO
+    if (esta_em_agenda_ativa and base.get("cache_ativo") and udi.get("data") and not base.get("coleta_horario")
+            and not ia_output.get("bypass_agente_humano") and _texto_ia_livre(base)):
+        txt_vod = re.sub(r"\s+", " ", re.sub(r"[!.,?]+", " ", txt_norm)).strip()
+        rejeita_dia_vod = (
+            bool(re.search(r"\bn(ao)?\s+(posso|consigo|da|rola|serve|gostei)\b", txt_vod))
+            or bool(re.match(r"^n(ao)?,? ?(nesse|nessa|esse dia|essa data)", txt_vod))
+            or bool(re.match(r"^n(ao)? quero (esse|nesse|essa)", txt_vod))
+        )
+        neg_vod = not rejeita_dia_vod and bool(re.match(
+            r"^(nao|n|nao quero|esse mesmo|esse|fico com esse|pode ser esse|deixa esse|quero esse|nao obrigado)$", txt_vod
+        ))
+        afirm_vod = not neg_vod and (
+            rejeita_dia_vod
+            or bool(re.match(r"^(s|si|sim|quero|pode|pode ser|ok|claro|isso|blz|beleza|por favor|sim quero|quero sim|pode sim)$", txt_vod))
+            or bool(re.search(r"\b(outro dia|proximo dia|ver outro|quero outro|dia seguinte)\b", txt_vod))
+            or txt_vod in ("outro", "proximo")
+        )
+        if afirm_vod:
+            base["texto_ia"] = (
+                '[VER OUTRO DIA CONFIRMADO: paciente quer ver o proximo dia disponivel. ⛔ OBRIGATORIO chamar '
+                'navegar_agenda(avancar) AGORA e EXIBIR o proximo dia que a tool retornar. ⛔ NAO repita os '
+                'horarios do dia atual. ⛔ NAO peca horario do dia atual. i="agenda".] ' + texto_usuario
+            )
+        elif neg_vod:
+            dt_vod = _br_data(udi["data"])
+            medicos_vod = udi.get("medicos") or []
+            hs_vod = (medicos_vod[0].get("horarios") if medicos_vod else "") or ""
+            base["texto_ia"] = (
+                f'[FICAR NO DIA ATUAL: paciente NAO quer outro dia. Responder EXATAMENTE: "Perfeito! Qual horário '
+                f'prefere para {dt_vod}: {hs_vod}? 😊" ⛔ NAO chame navegar_agenda. ⛔ NAO avance de dia. i="agenda".] '
+                + texto_usuario
+            )
+
+    # FIX_67635: desistencia da agenda
+    if esta_em_agenda_ativa and not ia_output.get("bypass_agente_humano") and not eh_cancel_real and _texto_ia_livre(base):
+        txt_des = txt_norm
+        desiste_forte = bool(re.search(
+            r"muito longe|deixa pra la|nao quero mais|desist[oi]|fica pra proxima|outra hora eu vejo|nao vou marcar|"
+            r"deixa quieto",
+            txt_des,
+        ))
+        tem_nenhum_des = bool(re.search(r"\bnenhum[a]?\b", txt_des))
+        if desiste_forte or (tem_nenhum_des and "obrigad" in txt_des):
+            intencao_rapida = "concluido"
+            unid_des = _norm(base.get("coleta_unidade"))
+            extra_des = (
+                ' Só um detalhe: também temos a unidade Tatuapé (Rua Soriano de Sousa, 189 - Tatuapé). Se ficar '
+                'melhor pra você, é só me chamar!'
+            ) if ("longe" in txt_des and "olimpia" in unid_des) else ""
+            base["texto_ia"] = (
+                '[DESISTENCIA AGENDA: paciente desistiu do agendamento. Responder EXATAMENTE: "Sem problemas! 😊 '
+                f'Quando quiser agendar é só me chamar. Até logo!{extra_des}" e emitir i="concluido" no $$$. '
+                '⛔ NAO ofereça horarios. ⛔ NAO re-pergunte.] ' + texto_usuario
+            )
+        elif tem_nenhum_des and base.get("cache_ativo") and udi.get("data") and not base.get("coleta_horario"):
+            intencao_rapida = "oferecer_outro_dia"
+            base["texto_ia"] = (
+                '[NENHUM HORARIO SERVIU: nenhum horario do dia exibido serve para o paciente. Responder EXATAMENTE: '
+                '"Entendi! Quer ver os horários de outro dia? 😊" ⛔ NAO repita os horarios do dia atual. i="agenda".] '
+                + texto_usuario
+            )
+
+    # Protege rota=4 em sub-fluxo
+    if esta_em_agenda_ativa and not eh_cancel_real and not eh_pergunta_ver and not eh_mensagem_informativa:
+        rota_agente = 4
+        if intencao_rapida == "triagem":
+            intencao_rapida = "agenda"
+
+    # FIX_COLETA_PROTECTION
+    if (base.get("sessao_intencao") == "coleta" and not eh_cancel_real and not ia_output.get("bypass_agente_humano")
+            and intencao_rapida not in ("remarcando", "remarcando_escolher")):
+        if all_coleta_confirmed and base.get("coleta_medico"):
+            base["_sub_rota_agenda"] = "navegacao"
+            intencao_rapida = "agenda"
+            if _texto_ia_livre(base):
+                txt_cc = txt_norm
+                conv_salvo_cc = _norm(base.get("coleta_convenio"))
+                conv_msg_cc = next((nome for rx, nome in _MAPA_CONVENIO if rx.search(txt_cc)), "")
+                afirma_cc = bool(re.match(
+                    r"^(s|si|sim|ok|pode|pode ser|isso|usar|quero usar|vou usar|esse mesmo|o mesmo|mesmo|novamente|"
+                    r"manter|pode usar)\b",
+                    txt_cc,
+                )) or (bool(conv_salvo_cc) and conv_salvo_cc in txt_cc)
+                if conv_msg_cc or afirma_cc:
+                    if conv_msg_cc:
+                        base["coleta_convenio"] = conv_msg_cc
+                    conv_final_cc = base["coleta_convenio"]
+                    per_txt = f', periodo="{base["coleta_periodo"]}"' if base.get("coleta_periodo") else ""
+                    base["texto_ia"] = (
+                        f'[CONVENIO CONFIRMADO — COLETA COMPLETA: conv="{conv_final_cc}". Chame buscar_agenda '
+                        f'AGORA com unidade="{base.get("coleta_unidade") or ""}", '
+                        f'medico="{base.get("coleta_medico") or ""}", data="{base.get("coleta_data") or ""}"'
+                        f'{per_txt} e mostre os horarios que a TOOL retornar. Setar conv="{conv_final_cc}", '
+                        'i="agenda" no $$$. ⛔ NAO pergunte convenio. ⛔ NAO mude unidade nem medico. ⛔ NUNCA '
+                        'invente horarios.] ' + texto_usuario
+                    )
+        else:
+            rota_agente = 3 if (base.get("sessao_rota") == "3" or base.get("coleta_terceiro") == "true") else 2
+            intencao_rapida = "coleta"
+
+    # FIX email: força eh_confirmacao=true para respostas de email
+    txt_email_norm2 = re.sub(r"[!.?]", "", txt_norm)
+    padroes_email_fix = ("n tenho", "nao tenho", "nao tenho email", "pular", "sem email")
+    eh_email_addr = bool(re.search(r"[\w.+-]+@[\w.-]+\.[a-z]{2,}", texto_usuario, re.IGNORECASE))
+    eh_resposta_email_fix = any(p in txt_email_norm2 for p in padroes_email_fix) or eh_email_addr
+    if rota_agente == 4 and base.get("coleta_horario") and base.get("coleta_data") and eh_resposta_email_fix:
+        ia_output["eh_confirmacao"] = True
+
+    # FIX_67553: carencia — guard de entrada na execucao
+    ult_conv_global = base.get("_ultimo_convenio_global") or ""
+    conv_ja_c = (base.get("coleta_convenio") or "").strip()
+    dt_min_c = base.get("data_minima_carencia") or ""
+    if (base.get("_sub_rota_agenda") == "execucao" and conv_ja_c and ult_conv_global
+            and conv_ja_c.lower() == ult_conv_global.lower()
+            and re.match(r"^\d{4}-\d{2}-\d{2}$", dt_min_c) and re.match(r"^\d{4}-\d{2}-\d{2}$", base.get("coleta_data") or "")
+            and base["coleta_data"] < dt_min_c
+            and not ia_output.get("bypass_agente_humano") and _texto_ia_livre(base)):
+        min_br_c = base.get("data_minima_carencia_br") or _br_data(dt_min_c)
+        esc_br_c = _br_data(base["coleta_data"])
+        txt_car = txt_norm
+        if re.search(r"\bparticular\b", txt_car):
+            base["coleta_convenio"] = "Particular"
+            base["texto_ia"] = (
+                f'[CONVENIO PARTICULAR CONFIRMADO: paciente optou por particular para manter {esc_br_c}. Salve '
+                'conv="Particular" no $$$ e continue: se ainda nao temos o email do paciente, pergunte o email '
+                'AGORA; senao chame criar_consulta/criar_consulta_terceiro AGORA com os dados salvos. ⛔ NAO mude '
+                'a data. ⛔ NAO pergunte convenio de novo.] ' + texto_usuario
+            )
+        elif re.search(r"buscar|a partir|nova data|outra data|essa data|aguardo|espero|apos|depois d|pode ser depois", txt_car):
+            rota_agente = 4
+            base["_sub_rota_agenda"] = "navegacao"
+            intencao_rapida = "agenda"
+            base["coleta_data"] = ""
+            base["coleta_dia_semana"] = ""
+            base["coleta_horario"] = ""
+            base["_clear_pm"] = {**(base.get("_clear_pm") or {}), "dt": 1, "ds": 1, "h": 1}
+            per_txt = f', periodo="{base["coleta_periodo"]}"' if base.get("coleta_periodo") else ""
+            base["texto_ia"] = (
+                f'[CARENCIA BUSCAR: paciente quer horarios a partir de {min_br_c} pelo {conv_ja_c}. Chame '
+                f'buscar_agenda AGORA com unidade="{base.get("coleta_unidade") or ""}", '
+                f'medico="{base.get("coleta_medico") or ""}", data="{dt_min_c}"{per_txt} e mostre os horarios que '
+                'a TOOL retornar. Setar dt="", h="" no $$$. ⛔ NUNCA invente horarios.] ' + texto_usuario
+            )
+        else:
+            base["texto_ia"] = (
+                f'[CARENCIA CONVENIO: pelo {conv_ja_c} a proxima consulta so pode ser a partir de {min_br_c} '
+                f'(carencia) e a data escolhida e {esc_br_c}. Responder EXATAMENTE: "Pelo convênio {conv_ja_c} sua '
+                f'próxima consulta pode ser a partir de {min_br_c}. Quer que eu busque horários a partir dessa '
+                f'data, ou prefere manter {esc_br_c} como particular? 😊" e emita i="execucao" no $$$. ⛔ PROIBIDO '
+                'chamar criar_consulta/criar_consulta_terceiro NESTE turno. ⛔ NUNCA mude a data sozinho.] ' + texto_usuario
+            )
+
+    # FIX_66512: gate de convenio na entrada da execucao
+    if (base.get("_sub_rota_agenda") == "execucao" and not (base.get("coleta_convenio") or "").strip()
+            and not ia_output.get("bypass_agente_humano") and not eh_email_addr and _texto_ia_livre(base)):
+        txt_gc = txt_norm
+        conv_msg_gc = next((nome for rx, nome in _MAPA_CONVENIO if rx.search(txt_gc)), "")
+        reuso_gc = base.get("sessao_intencao") != "confirmacao" and ult_conv_global and bool(re.match(
+            r"^(s|si|sim|ok|pode|pode ser|isso|usar|quero usar|vou usar|esse mesmo|o mesmo|mesmo|novamente|manter|"
+            r"pode usar)\b",
+            txt_gc,
+        ))
+        if conv_msg_gc or reuso_gc:
+            base["coleta_convenio"] = conv_msg_gc or ult_conv_global
+            dt_min_c512 = base.get("data_minima_carencia") or ""
+            viola_c512 = (
+                ult_conv_global and base["coleta_convenio"].lower() == ult_conv_global.lower()
+                and re.match(r"^\d{4}-\d{2}-\d{2}$", dt_min_c512) and re.match(r"^\d{4}-\d{2}-\d{2}$", base.get("coleta_data") or "")
+                and base["coleta_data"] < dt_min_c512
+            )
+            if viola_c512:
+                min_br_512 = base.get("data_minima_carencia_br") or _br_data(dt_min_c512)
+                esc_br_512 = _br_data(base["coleta_data"])
+                base["texto_ia"] = (
+                    f'[CARENCIA CONVENIO: pelo {base["coleta_convenio"]} a proxima consulta so pode ser a partir de '
+                    f'{min_br_512} (carencia) e a data escolhida e {esc_br_512}. Responder EXATAMENTE: "Pelo '
+                    f'convênio {base["coleta_convenio"]} sua próxima consulta pode ser a partir de {min_br_512}. '
+                    f'Quer que eu busque horários a partir dessa data, ou prefere manter {esc_br_512} como '
+                    'particular? 😊" e emita i="execucao" no $$$. ⛔ PROIBIDO chamar criar_consulta/'
+                    'criar_consulta_terceiro NESTE turno. ⛔ NUNCA mude a data sozinho.] ' + texto_usuario
+                )
+            else:
+                base["texto_ia"] = (
+                    f'[CONVENIO RECEBIDO: conv="{base["coleta_convenio"]}". Salve conv="{base["coleta_convenio"]}" '
+                    'no $$$ e continue: se ainda nao temos o email do paciente, pergunte o email AGORA; senao '
+                    'chame criar_consulta/criar_consulta_terceiro AGORA com os dados salvos. ⛔ NAO pergunte '
+                    'convenio de novo.] ' + texto_usuario
+                )
+        elif base.get("sessao_intencao") == "confirmacao":
+            pergunta_conv_global = base.get("_pergunta_convenio_global") or "A consulta será Particular ou Convênio? 😊"
+            base["texto_ia"] = (
+                f'[GATE CONVENIO: dados confirmados, mas o convenio nao foi coletado. Responder EXATAMENTE: '
+                f'"{pergunta_conv_global}" e emita i="execucao" no $$$. ⛔ PROIBIDO chamar criar_consulta/'
+                'criar_consulta_terceiro NESTE turno — so no proximo, apos a resposta.] ' + texto_usuario
+            )
+        else:
+            base["texto_ia"] = (
+                '[GATE CONVENIO: o convenio ainda nao foi definido. Responder EXATAMENTE: "A consulta será '
+                'Particular ou Convênio? Se convênio, qual? 😊" e emita i="execucao" no $$$. ⛔ PROIBIDO chamar '
+                'criar_consulta/criar_consulta_terceiro NESTE turno.] ' + texto_usuario
+            )
+
+    # FIX_59124: gate de email deterministico na entrada da execucao
+    email_ficha_ge = ((base.get("pacientes") or [{}])[0] or {}).get("email") or ""
+    email_conhecido_ge = bool(email_ficha_ge) or bool((base.get("coleta_email") or "").strip())
+    if (base.get("_sub_rota_agenda") == "execucao" and not email_conhecido_ge
+            and not ia_output.get("bypass_agente_humano") and _texto_ia_livre(base)):
+        if eh_resposta_email_fix:
+            m_email_ge = re.search(r"[\w.+-]+@[\w.-]+\.[a-z]{2,}", texto_usuario, re.IGNORECASE)
+            tool_ge = "criar_consulta_terceiro" if base.get("coleta_terceiro") in ("true", True) else "criar_consulta"
+            if m_email_ge:
+                base["coleta_email"] = m_email_ge.group(0)
+                base["texto_ia"] = (
+                    f'[EMAIL RECEBIDO: paciente informou o email {m_email_ge.group(0)}. Chame {tool_ge} AGORA com '
+                    f'email_paciente="{m_email_ge.group(0)}" e os dados salvos. Salve email="{m_email_ge.group(0)}" '
+                    'no $$$. ⛔ NAO pergunte mais nada antes de criar.] ' + texto_usuario
+                )
+            else:
+                base["texto_ia"] = (
+                    f'[SEM EMAIL: paciente nao quer informar email (permitido — ausencia de email NAO e recusa de '
+                    f'agendamento). Chame {tool_ge} AGORA com email_paciente="" e os dados salvos. ⛔ NAO insista '
+                    'no email.] ' + texto_usuario
+                )
+        elif base.get("sessao_intencao") == "confirmacao":
+            txt_end_ge = txt_norm
+            pede_end_ge = bool(re.search(
+                r"endereco|onde fica|localiza|como cheg|qual a rua|qual rua|aonde fica|fica aonde|fica onde|"
+                r"qual bairro|(passa|manda|qual|e)\s+o\s+local|local da (clinica|consulta|unidade)", txt_end_ge
+            ))
+            unid_ge = _norm(base.get("coleta_unidade"))
+            if "tatuape" in unid_ge:
+                end_unid_ge = "📍 Tatuapé — Rua Soriano de Sousa, 189 - Tatuapé, 1° Andar, sala 14."
+            elif "olimpia" in unid_ge:
+                end_unid_ge = (
+                    "📍 Vila Olímpia — Rua Alvorada, 1289 - Vila Olímpia, Condomínio Vila Olímpia Prime Office, "
+                    "15°Andar - sala 1508"
+                )
+            else:
+                end_unid_ge = ""
+            prefix_end_ge = f'Claro! O endereço é:\n{end_unid_ge}\n\n' if (pede_end_ge and end_unid_ge) else ""
+            base["texto_ia"] = (
+                f'[GATE EMAIL: dados confirmados, mas nao temos o email do paciente. Responder EXATAMENTE: '
+                f'"{prefix_end_ge}Para enviar a confirmação, qual seu email? 😊" e emita i="execucao" no $$$. '
+                '⛔ PROIBIDO chamar criar_consulta/criar_consulta_terceiro NESTE turno — so no proximo, apos a '
+                'resposta (email ou "nao"/"pular").] ' + texto_usuario
+            )
+
+    return ResultadoParte4(base=base, intencao_rapida=intencao_rapida, rota_agente=rota_agente, sub_rota_agenda=sub_rota_agenda)
