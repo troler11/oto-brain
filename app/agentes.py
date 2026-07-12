@@ -50,6 +50,7 @@ class EstadoConsulta(BaseModel):
     ds: str = ""
     cf: int = -1
     email: str = ""
+    nome_paciente: str = ""  # usado só pelo Agente Humano, na confirmação de transferência
 
 
 class RespostaAgente(BaseModel):
