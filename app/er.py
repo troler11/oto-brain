@@ -128,6 +128,7 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 
@@ -2443,8 +2444,29 @@ _GRADE_DIA_SEM_UNIDADE = {
 _NOMES_DSU = {"seg": "segunda", "ter": "terça", "qua": "quarta", "qui": "quinta", "sex": "sexta"}
 
 
+_hoje_override: datetime | None = None
+
+
 def _hoje_sp() -> datetime:
+    if _hoje_override is not None:
+        return _hoje_override
     return datetime.now(timezone.utc) - timedelta(hours=3)
+
+
+@contextmanager
+def hoje_fixado(dt: datetime):
+    """Override de `_hoje_sp()` pro replay offline (scripts/replay_offline.py) — turnos
+    históricos precisam calcular "próxima segunda"/"hoje" em cima da data REAL do turno, não
+    do wall-clock do processo rodando o replay. Sem isso, todo guard sensível a data
+    (FIX_DIA_PERIODO_DETERMINISTICO, _proxima_data_dow, etc) diverge do gabarito por motivo
+    espúrio. `dt=None` (padrão de `_hoje_sp`) preserva o comportamento normal em produção."""
+    global _hoje_override
+    anterior = _hoje_override
+    _hoje_override = dt
+    try:
+        yield
+    finally:
+        _hoje_override = anterior
 
 
 def _proxima_data_dow(dow_alvo: int) -> str:

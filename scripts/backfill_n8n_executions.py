@@ -34,8 +34,17 @@ MAIN_WORKFLOW_ID = os.environ.get("OTO_MAIN_WORKFLOW_ID", "")
 
 # Nós cujo output carrega estado de conversa — o resto (nós de infra, sub-agentes de memória
 # do LangChain, etc.) não interessa pro corpus de replay do router.
+# Montar Contexto / 6. Agrupar Textos1 / AI Agent adicionados 12/07 — são os 3 nós que o
+# Extrair Rota lê como INPUT (`$('Montar Contexto').first().json`, `$('6. Agrupar
+# Textos1').first().json.mensagem_agrupada`, `$('AI Agent').first().json.output`), confirmado
+# grepando `$('...')` no JS fonte. Sem eles o corpus só tem o OUTPUT do turno (serve de gabarito
+# pra comparar), não o INPUT (não dá pra rodar app.er.processar() de verdade) — motivo do
+# re-backfill com --overwrite sobre as 8.666 linhas já gravadas sem esses 3 nós.
 NOS_INTERESSE = {
     "Recebe WhatsApp1",
+    "Montar Contexto",
+    "6. Agrupar Textos1",
+    "AI Agent",
     "Extrair Rota",
     "Extrair Intencao Final1",
     "State Validator",
@@ -152,6 +161,10 @@ def main():
     ap.add_argument("--since", default=None, help="ISO8601 — só execuções a partir daqui")
     ap.add_argument("--limit", type=int, default=None, help="máximo de execuções a processar (teste)")
     ap.add_argument("--dry-run", action="store_true", help="não grava no Postgres, só mostra contagem")
+    ap.add_argument("--overwrite", action="store_true",
+                     help="sobrescreve linhas já existentes (ON CONFLICT DO UPDATE) em vez de pular — "
+                          "necessário quando NOS_INTERESSE ganha nós novos e as linhas antigas precisam "
+                          "ser reenriquecidas")
     args = ap.parse_args()
 
     if not (N8N_BASE_URL and N8N_API_KEY and MAIN_WORKFLOW_ID):
@@ -162,7 +175,8 @@ def main():
     if not args.dry_run:
         conn = psycopg.connect(PG_DSN, autocommit=True)
         with conn.cursor() as cur:
-            cur.execute(open(__file__.replace("backfill_n8n_executions.py", "schema.sql")).read())
+            schema_path = __file__.replace("backfill_n8n_executions.py", "schema.sql")
+            cur.execute(open(schema_path, encoding="utf-8").read())
 
     inseridos = pulados = erros = total = 0
     t0 = time.time()
@@ -184,7 +198,7 @@ def main():
             if args.dry_run:
                 inseridos += 1
             else:
-                if gravar(conn, row):
+                if gravar(conn, row, overwrite=args.overwrite):
                     inseridos += 1
                 else:
                     pulados += 1
