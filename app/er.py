@@ -77,6 +77,19 @@ arquivo cobre, em fatias sucessivas:
     personalizada "quer repetir o mesmo convênio?" está pendente) e FIX_PROTECAO_COLETA_CONVENIO
     (re-pergunta convênio sem resetar campos quando o texto não é convênio nem mudança de
     assunto, distinguindo confirmação genérica / pergunta sobre opções / resposta inválida).
+  PARTE 12 (linhas 4196-4409): FIX_PARTICULAR_DETERMINISTIC (exibe preços do particular),
+    FIX_PARTICULAR_CONFIRMADO (aceita/recusa/pendura conforme a resposta — recusa forte vira
+    transferência humana), FIX_MODO1_SEM_DIA_SEMANA, FIX_0PAC_CADASTRO_INTRO (explica o cadastro
+    antes de pedir nome pra paciente novo), FIX_GRADE_MED_EXPLICITO/DADOS_MED_INJECT (injeta
+    grade compacta de referência pro LLM, exceto quando "1"/"2"/"3" bare ainda não tem médico
+    selecionado — nesse caso "1" vira modo=1 determinístico), FIX_RETOMAR_ESPECIALISTA (após FAQ
+    no meio da escolha de especialista, re-exibe a lista em vez de voltar ao menu P3),
+    FIX_DUVIDA_GENERICA e FIX_RESPOSTA_CURTA_TRIAGEM (resposta curta tipo "sim"/"ok" na triagem —
+    forte inicia agendamento, fraca pede confirmação explícita). `eh_texto_terceiro`,
+    `eh_mensagem_informativa`, `eh_sessao_nova` (de `ResultadoIntake`, Parte 1) e `faq_tag` (de
+    `ResultadoParte9`, adicionado a esse dataclass agora porque só aqui ele volta a ser lido)
+    entram como parâmetros. **Achado**: `_LM_VO`/`_LM_TA` (listas de médicos formatadas) são
+    declaradas no bloco DADOS_MED_INJECT do JS mas nunca lidas — dead code, omitido no port.
 O resto (guards de criação de consulta, cancelamento, empacotamento final) fica pra próximas
 fatias — cada uma seguindo o mesmo padrão de port fiel + testes.
 
@@ -4254,6 +4267,7 @@ class ResultadoParte9:
     base: dict
     intencao_rapida: str
     rota_agente: int
+    faq_tag: str = ""
 
 
 def processar_menu_p3_e_faq(
@@ -4531,7 +4545,7 @@ def processar_menu_p3_e_faq(
                 )
             base["texto_ia"] = faq_resp + faq_retomada + f'\n\n[Mensagem original: {texto_usuario}]'
 
-    return ResultadoParte9(base=base, intencao_rapida=intencao_rapida, rota_agente=rota_agente)
+    return ResultadoParte9(base=base, intencao_rapida=intencao_rapida, rota_agente=rota_agente, faq_tag=faq_tag)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -5281,3 +5295,267 @@ def processar_convenio_omint_e_ultimo(
                 )
 
     return ResultadoParte11(base=base, intencao_rapida=intencao_rapida, rota_agente=rota_agente)
+
+
+# ---------------------------------------------------------------------------------------------
+# PARTE 12 (linhas 4196-4409)
+# ---------------------------------------------------------------------------------------------
+
+@dataclass
+class ResultadoParte12:
+    base: dict
+    intencao_rapida: str
+    rota_agente: int
+
+
+def processar_particular_dados_med_triagem(
+    base: dict,
+    texto_usuario: str,
+    intencao_rapida: str,
+    rota_agente: int,
+    ia_output: dict,
+    eh_texto_terceiro: bool,
+    eh_mensagem_informativa: bool,
+    eh_sessao_nova: bool,
+    faq_tag: str,
+) -> ResultadoParte12:
+    """Linhas 4196-4409 do JS fonte: FIX_PARTICULAR_DETERMINISTIC, FIX_PARTICULAR_CONFIRMADO
+    (aceita/recusa/pendura — recusa forte vira transferência humana), FIX_MODO1_SEM_DIA_SEMANA,
+    FIX_0PAC_CADASTRO_INTRO, FIX_GRADE_MED_EXPLICITO/DADOS_MED_INJECT, FIX_RETOMAR_ESPECIALISTA,
+    FIX_DUVIDA_GENERICA, FIX_RESPOSTA_CURTA_TRIAGEM."""
+
+    # FIX_PARTICULAR_DETERMINISTIC: exibir precos quando paciente diz "particular"
+    if rota_agente in (2, 3) and base.get("coleta_unidade"):
+        txt_part = _norm(texto_usuario)
+        conv_atual_p = (base.get("coleta_convenio") or "").lower()
+        conv_vazio_p = not conv_atual_p or conv_atual_p == "reset_conv"
+        eh_pergunta_p = any(k in txt_part for k in ("?", "qual", "aceita", "quais"))
+        if not eh_pergunta_p and conv_vazio_p and ("particular" in txt_part or txt_part == "part"):
+            base["coleta_convenio"] = "PART?"
+            base["texto_ia"] = (
+                '[PARTICULAR DETECTADO] conv="PART?" no $$$. Resposta EXATA:\n'
+                '"Informações para agendamento Consulta no Particular:\n\n'
+                '✔️ Incluso 1 retorno em até 30 dias\n\n'
+                '✔️ Durante a consulta, se necessário, realizamos os seguintes procedimentos já inclusos no '
+                'valor:\n\n'
+                '- Vídeo-endoscopia naso-sinusal com ótica flexível\n'
+                '- Vídeo-faringo-laringoscopia com endoscópio flexível\n'
+                '- Nasofibrolaringoscopia para diagnóstico\n'
+                '- Cerúmen-remoção (bilateral)\n\n'
+                '📌 Formas de pagamento:\n\n'
+                '- R$ 600,00 no débito ou crédito à vista\n'
+                '- R$ 570,00 via PIX (5% de desconto)\n\n'
+                'Deseja agendar como Particular? 😊"\n'
+                '⛔ NÃO use "Ótimo!". ⛔ conv="PART?" no bloco final. ⛔ NUNCA pule os preços.'
+            )
+
+    # FIX_PARTICULAR_CONFIRMADO: PART? + confirmacao positiva -> conv="Particular" deterministico
+    if rota_agente in (2, 3) and (base.get("coleta_convenio") or "").upper() == "PART?" and _texto_ia_livre(base):
+        txt_pc = _norm(texto_usuario)
+        eh_pergunta_pc = any(k in txt_pc for k in ("?", "qual", "quanto", "quais"))
+        eh_neg_pc = bool(re.search(r"\b(nao|outro|prefiro|mudar|trocar|convenio|plano)\b|caro|condicoes", txt_pc))
+        conf_pc = [
+            "s", "sim", "quero", "quero agendar", "pode", "pode ser", "pode agendar", "pode marcar", "isso",
+            "confirmo", "confirma", "aceito", "aceitar", "bora", "ok", "okay", "claro", "perfeito", "ta bom",
+            "ta certo", "beleza", "agendar", "agenda", "marcar",
+        ]
+        eh_conf_pc = not eh_pergunta_pc and not eh_neg_pc and (
+            txt_pc in conf_pc
+            or txt_pc.startswith(("sim", "quero", "pode", "confirm", "aceit"))
+            or any(p in txt_pc for p in ("agendar", "marcar", "prosseguir", "continuar"))
+        )
+        if eh_conf_pc:
+            base["coleta_convenio"] = "Particular"
+            identidade_incompleta_pc = not base.get("paciente_encontrado")
+            if (
+                base.get("coleta_data") and base.get("coleta_periodo") and base.get("coleta_unidade")
+                and not identidade_incompleta_pc
+            ):
+                med_busca_pc = (
+                    "sem preferencia" if (_int(base.get("coleta_modo")) == 1 or not base.get("coleta_medico"))
+                    else base["coleta_medico"]
+                )
+                rota_agente = 4
+                base["_sub_rota_agenda"] = "navegacao"
+                intencao_rapida = "agenda"
+                base["texto_ia"] = (
+                    '[PARTICULAR CONFIRMADO + BUSCAR AGENDA: paciente aceitou agendar como Particular e a '
+                    'coleta esta completa. Setar conv="Particular", i="agenda" no $$$. PRESERVAR '
+                    f'unid/med/dt/per/ds/modo/d/c/n (NAO zere nada). Chame buscar_agenda AGORA com '
+                    f'unid="{base["coleta_unidade"]}", med="{med_busca_pc}", dt="{base["coleta_data"]}", '
+                    f'per="{base["coleta_periodo"]}". Comece a resposta com "Ótimo!" e mostre os horarios que a '
+                    'TOOL retornar. ⛔ NUNCA invente horarios. ⛔ NAO pergunte "Posso verificar?". ⛔ NAO va para '
+                    'o fluxo HUMANO.] ' + texto_usuario
+                )
+            else:
+                per_disp_pc = (
+                    "manhã" if base.get("coleta_periodo") == "manha"
+                    else ("tarde" if base.get("coleta_periodo") == "tarde" else base.get("coleta_periodo"))
+                )
+                resumo_pc = f'Particular na {base.get("coleta_unidade")}'
+                if base.get("coleta_medico") and base["coleta_medico"] != "sem preferencia":
+                    resumo_pc += f' com {base["coleta_medico"]}'
+                if per_disp_pc:
+                    resumo_pc += f', pela {per_disp_pc}'
+                base["texto_ia"] = (
+                    '[PARTICULAR CONFIRMADO: paciente aceitou agendar como Particular. Setar conv="Particular", '
+                    'i="navegacao" no $$$. PRESERVAR unid/med/dt/per/ds/modo/d/c/n (NAO zere nada). Responder '
+                    f'EXATAMENTE: "Ótimo! Consulta como {resumo_pc}. Posso verificar os horários disponíveis? '
+                    '😊" ⛔ NAO va para o fluxo HUMANO. ⛔ NAO pergunte convenio.] '
+                    + (base.get("texto_ia") or texto_usuario)
+                )
+        elif not eh_neg_pc:
+            base["texto_ia"] = (
+                '[PARTICULAR PENDENTE: o paciente ainda nao confirmou se quer agendar como Particular. '
+                'OBRIGATORIO perguntar: "Deseja agendar como Particular? 😊" ⛔ NAO busque horarios. ⛔ NAO '
+                'avance no fluxo.] ' + texto_usuario
+            )
+        else:
+            recusa_forte_pc = (
+                bool(re.match(r"^\W*n(ao)?\W*$", txt_pc))
+                or bool(re.search(r"\bnao\b[^.,!?]{0,30}(particular|quero|vou|da|posso|compensa|vale)", txt_pc))
+                or bool(re.search(r"muito caro|caro demais|ta caro|nao tenho condicoes|sem condicoes", txt_pc))
+                or bool(re.search(r"\b(prefiro|pelo|com o|so o)\s*(meu\s*)?(convenio|plano)\b", txt_pc))
+            )
+            cita_conv_aceito_pc = bool(re.search(r"porto|itau|omint|bradesco", txt_pc))
+            if recusa_forte_pc and not cita_conv_aceito_pc and not ia_output.get("bypass_agente_humano"):
+                ia_output["bypass_agente_humano"] = True
+                intencao_rapida = "humano"
+                base["motivo_humano"] = "Recusou particular"
+                base["texto_ia"] = (
+                    '[RECUSA PARTICULAR → ATENDENTE: paciente nao quer agendar como Particular. Responder '
+                    'EXATAMENTE: "Sem problemas! 😊 Vou te passar para um atendente para te ajudar, um '
+                    'instante!" e emitir i="humano", motivo="Recusou particular".] ' + texto_usuario
+                )
+
+    # FIX_MODO1_SEM_DIA_SEMANA: modo 1 = "primeiro horario disponivel" busca TODOS os dias
+    if _int(base.get("coleta_modo")) == 1 and base.get("coleta_dia_semana"):
+        base["coleta_dia_semana"] = ""
+
+    # FIX_0PAC_CADASTRO_INTRO: paciente sem cadastro respondeu o P1 pela primeira vez
+    if (
+        rota_agente in (2, 3) and not base.get("paciente_encontrado") and not base.get("nome_dependente")
+        and _texto_ia_livre(base)
+    ):
+        txt_p1i = _strip_accents(texto_usuario).lower().strip()
+        responde_p1 = (
+            bool(re.match(r"^(para mim|pra mim|e para mim|e pra mim|sou eu|eu mesmo|eu mesma|comigo|eu)$", txt_p1i))
+            or txt_p1i in AFIRMACOES_TITULAR
+            or eh_texto_terceiro
+        )
+        if responde_p1:
+            base["texto_ia"] = (
+                '[CADASTRO NOVO: paciente respondeu ao P1. NAO tem cadastro no sistema. Responder EXATAMENTE: '
+                '"Não encontrei seu cadastro em nosso sistema. Para seguirmos com o agendamento, preciso fazer '
+                'seu cadastro — vou te pedir algumas informações rapidinho. 😊 Qual o seu nome completo?" '
+                f't={"true" if eh_texto_terceiro else "false"}, i="coleta" no $$$.] ' + texto_usuario
+            )
+
+    # FIX_GRADE_MED_EXPLICITO / DADOS_MED_INJECT
+    if rota_agente in (2, 3) and base.get("coleta_unidade"):
+        is_ta_dm = "Tatu" in base["coleta_unidade"]
+        gm_vo = (
+            "Giseli→terça(manhã e tarde),quarta(manhã),sexta(manhã) | Elias→terça(tarde),quarta(manhã e tarde) "
+            "| Jose→segunda(manhã e tarde),quarta(manhã),quinta(manhã e tarde) | Stephanie→segunda(manhã:"
+            "teleconsulta/tarde:presencial),terça(manhã:teleconsulta),quarta(tarde) | Juliana→segunda(tarde),"
+            "sexta(tarde) | Torcuato→quarta(tarde),quinta(manhã e tarde),sexta(manhã e tarde) | "
+            "Fernanda→quinta(tarde) | Caio→terça(manhã)"
+        )
+        gm_ta = (
+            "Elias→segunda(manhã e tarde),sexta(manhã) | Jose→terça(manhã e tarde) | Caio→quarta(manhã e "
+            "tarde) | Giseli→quinta(manhã e tarde) | Fernanda→sexta(tarde)"
+        )
+        dl_vo = (
+            "Giseli:ter→Ambos|qua→manha|sex→manha\nElias:ter→tarde|qua→Ambos\nJose:seg→Ambos|qua→manha|"
+            "qui→Ambos\nStephanie:seg→Ambos|ter→manha|qua→tarde\nJuliana:seg→tarde|sex→tarde\nTorcuato:"
+            "qua→tarde|qui→Ambos|sex→Ambos\nFernanda:qui→tarde\nCaio:ter→manha"
+        )
+        dl_ta = "Elias:seg→Ambos|sex→manha\nJose:ter→Ambos\nCaio:qua→Ambos\nGiseli:qui→Ambos\nFernanda:sex→tarde"
+
+        dados_med = (
+            f"[DADOS_MED]\nGRADE_MED: {gm_ta if is_ta_dm else gm_vo}\nDIA_LOOKUP: {dl_ta if is_ta_dm else dl_vo}\n"
+            "[/DADOS_MED]"
+        )
+        bare_menu_dm = bool(re.fullmatch(r"[123]", texto_usuario.strip()))
+        med_ja_selecionado_dm = bool(
+            base.get("coleta_medico") and base["coleta_medico"] not in ("__CLEAR__", "sem preferencia")
+        )
+        if bare_menu_dm and not med_ja_selecionado_dm:
+            base["texto_ia"] = base.get("texto_ia") or texto_usuario
+            if texto_usuario.strip() == "1" and _texto_ia_livre(base):
+                base["coleta_medico"] = "sem preferencia"
+                base["coleta_modo"] = 1
+                base["coleta_data"] = _hoje_sp().strftime("%Y-%m-%d")
+                base["_modo1_precomputed"] = True
+        else:
+            base["texto_ia"] = dados_med + "\n\n" + (base.get("texto_ia") or texto_usuario)
+
+    # FIX_RETOMAR_ESPECIALISTA: apos FAQ no meio da escolha de especialista, re-exibe a lista
+    if (
+        rota_agente in (2, 3) and base.get("coleta_unidade") and _int(base.get("coleta_modo")) == 2
+        and not base.get("coleta_medico") and not base.get("coleta_data") and not base.get("coleta_periodo")
+        and not eh_mensagem_informativa
+    ):
+        txt_rem = _norm(texto_usuario)
+        eh_conf_rem = bool(re.match(
+            r"^(s|sim|pode|pode ser|ok|isso|quero|continuar|continua|bora|vamos|aceito|claro|positivo|sim "
+            r"quero|quero sim|prosseguir|segue|vamo)$", txt_rem,
+        ))
+        if eh_conf_rem:
+            base["texto_ia"] = (
+                '[RETOMAR ESCOLHA ESPECIALISTA: paciente confirmou continuar o agendamento. Estava escolhendo o '
+                f'especialista em {base["coleta_unidade"]}. Envie LITERALMENTE a lista de medicos abaixo e '
+                'pergunte qual prefere. ⛔ NAO mostre o menu 1/2/3 de novo. ⛔ NAO reinicie etapas ja '
+                'preenchidas.]\n\n' + (base.get("lista_med") or "")
+            )
+
+    # FIX_DUVIDA_GENERICA: "queria tirar uma duvida" -> pergunta qual e, nao transfere pra humano
+    if (
+        rota_agente == 0 and eh_sessao_nova and not faq_tag and not ia_output.get("bypass_agente_humano")
+        and _texto_ia_livre(base)
+    ):
+        txt_duv = _norm(texto_usuario)
+        if re.search(
+            r"tirar (uma |a )?d[uú]vida|tenho (uma )?d[uú]vida|s[oó] uma d[uú]vida|precis[ao] (tirar|de) (uma "
+            r")?d[uú]vida|queria perguntar|queria saber", txt_duv,
+        ):
+            base["texto_ia"] = (
+                '[DUVIDA GENERICA: paciente quer tirar uma duvida. Pergunte EXATAMENTE: "Qual é a sua dúvida? '
+                '😊 Posso te ajudar com agendamentos, convênios, endereços e valores." ⛔ NAO transfira para '
+                'humano.]'
+            )
+
+    # FIX_RESPOSTA_CURTA_TRIAGEM: resposta positiva curta (s/sim/ok) em sessao triagem sem coleta ativa
+    if (
+        rota_agente == 0 and eh_sessao_nova and not faq_tag and base.get("sessao_intencao") != "oferta_humano"
+        and not ia_output.get("bypass_agente_humano") and _texto_ia_livre(base)
+    ):
+        txt_ct = _norm(texto_usuario)
+        eh_resposta_curta = bool(re.match(
+            r"^(s|sim|ok|yes|pode|claro|isso|quero|bora|vamos|aceito|certo|beleza|show)$", txt_ct,
+        ))
+        eh_sim_forte = bool(re.match(r"^(s|si|sim|quero|bora|vamos)$", txt_ct))
+        if eh_resposta_curta and not eh_sim_forte:
+            base["texto_ia"] = (
+                f'[CONFIRMACAO FRACA: paciente respondeu "{texto_usuario}" sem contexto claro. Responder '
+                'EXATAMENTE: "Você gostaria de agendar uma consulta? 😊" ⛔ NAO responda "o que posso fazer". '
+                '⛔ NAO mostre o menu principal de novo.] ' + texto_usuario
+            )
+        if eh_sim_forte:
+            pacs_rc = base.get("pacientes") or []
+            if len(pacs_rc) == 1:
+                q_p1_rc = f'A consulta será para {pacs_rc[0].get("nome")} ou para outra pessoa? 😊'
+            elif len(pacs_rc) >= 2:
+                nomes_rc = ", ".join(p.get("nome", "") for p in pacs_rc)
+                q_p1_rc = f'A consulta será para {nomes_rc}? Ou para outra pessoa? 😊'
+            else:
+                q_p1_rc = "A consulta será para você ou para outra pessoa? 😊"
+            rota_agente = 2
+            intencao_rapida = "coleta"
+            base["texto_ia"] = (
+                '[INICIO AGENDA CONFIRMADO: paciente confirmou que quer agendar. Setar i="coleta" no $$$. '
+                f'Responder EXATAMENTE: "Perfeito! Vou te ajudar a agendar. 😊 {q_p1_rc}" ⛔ NAO pergunte "o que '
+                'posso fazer". ⛔ NAO re-pergunte se quer agendar. ⛔ NAO mostre o menu principal.] ' + texto_usuario
+            )
+
+    return ResultadoParte12(base=base, intencao_rapida=intencao_rapida, rota_agente=rota_agente)
