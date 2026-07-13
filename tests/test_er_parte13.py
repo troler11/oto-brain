@@ -34,9 +34,11 @@ def _base(**overrides):
     return b
 
 
-def _proc(texto, base=None, intencao_rapida="triagem", rota_agente=0, ia_output=None):
+def _proc(texto, base=None, intencao_rapida="triagem", rota_agente=0, ia_output=None, identidade_incompleta=False):
     io = ia_output if ia_output is not None else {}
-    r = processar_agradecimento_triagem_multidados(base or _base(), texto, intencao_rapida, rota_agente, io)
+    r = processar_agradecimento_triagem_multidados(
+        base or _base(), texto, intencao_rapida, rota_agente, io, identidade_incompleta,
+    )
     return r, io
 
 

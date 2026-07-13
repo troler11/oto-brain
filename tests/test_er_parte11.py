@@ -31,9 +31,9 @@ def _base(**overrides):
     return b
 
 
-def _proc(texto, base=None, intencao_rapida="agenda", rota_agente=2, ia_output=None):
+def _proc(texto, base=None, intencao_rapida="agenda", rota_agente=2, ia_output=None, identidade_incompleta=False):
     io = ia_output if ia_output is not None else {}
-    r = processar_convenio_omint_e_ultimo(base or _base(), texto, intencao_rapida, rota_agente, io)
+    r = processar_convenio_omint_e_ultimo(base or _base(), texto, intencao_rapida, rota_agente, io, identidade_incompleta)
     return r, io
 
 

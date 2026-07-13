@@ -4685,6 +4685,7 @@ def processar_convenio_e_dia_deterministico(
     texto_usuario: str,
     intencao_rapida: str,
     rota_agente: int,
+    identidade_incompleta: bool,
 ) -> ResultadoParte10:
     """Linhas 3691-3982 do JS fonte: aceite determinístico de Porto Seguro/Itaú,
     "qualquer um" pós-desambiguação, dia da semana sem médico (com parsing de data absoluta tipo
@@ -4707,8 +4708,7 @@ def processar_convenio_e_dia_deterministico(
             unid_pi = base.get("coleta_unidade") or ""
             per_pi = base.get("coleta_periodo") or "manhã"
             base["coleta_convenio"] = conv_detect
-            identidade_incompleta_pi = not base.get("paciente_encontrado")
-            if base.get("coleta_data") and base.get("coleta_periodo") and not identidade_incompleta_pi:
+            if base.get("coleta_data") and base.get("coleta_periodo") and not identidade_incompleta:
                 med_busca_pi = (
                     "sem preferencia" if (_int(base.get("coleta_modo")) == 1 or not base.get("coleta_medico"))
                     else base["coleta_medico"]
@@ -5018,6 +5018,7 @@ def processar_convenio_omint_e_ultimo(
     intencao_rapida: str,
     rota_agente: int,
     ia_output: dict,
+    identidade_incompleta: bool,
 ) -> ResultadoParte11:
     """Linhas 3984-4194 do JS fonte: FIX_CONVENIO_ACEITO (Bradesco/Porto/Itaú determinísticos),
     FIX_OMINT_V2 parte 2 (categoria + backstop de médico incompatível + menção a médico fora do
@@ -5047,10 +5048,9 @@ def processar_convenio_omint_e_ultimo(
                 med_omint_ok_ca = conv_aceito != "Omint" or any(
                     m in _norm(base.get("coleta_medico") or "") for m in ("giseli", "elias", "jose")
                 )
-                identidade_incompleta_ca = not base.get("paciente_encontrado")
                 if (
                     base.get("coleta_data") and base.get("coleta_periodo") and med_omint_ok_ca
-                    and not identidade_incompleta_ca
+                    and not identidade_incompleta
                 ):
                     med_busca_ca = (
                         "sem preferencia" if (_int(base.get("coleta_modo")) == 1 or not base.get("coleta_medico"))
@@ -5371,6 +5371,7 @@ def processar_particular_dados_med_triagem(
     eh_mensagem_informativa: bool,
     eh_sessao_nova: bool,
     faq_tag: str,
+    identidade_incompleta: bool,
 ) -> ResultadoParte12:
     """Linhas 4196-4409 do JS fonte: FIX_PARTICULAR_DETERMINISTIC, FIX_PARTICULAR_CONFIRMADO
     (aceita/recusa/pendura — recusa forte vira transferência humana), FIX_MODO1_SEM_DIA_SEMANA,
@@ -5419,10 +5420,9 @@ def processar_particular_dados_med_triagem(
         )
         if eh_conf_pc:
             base["coleta_convenio"] = "Particular"
-            identidade_incompleta_pc = not base.get("paciente_encontrado")
             if (
                 base.get("coleta_data") and base.get("coleta_periodo") and base.get("coleta_unidade")
-                and not identidade_incompleta_pc
+                and not identidade_incompleta
             ):
                 med_busca_pc = (
                     "sem preferencia" if (_int(base.get("coleta_modo")) == 1 or not base.get("coleta_medico"))
@@ -5653,6 +5653,7 @@ def processar_agradecimento_triagem_multidados(
     intencao_rapida: str,
     rota_agente: int,
     ia_output: dict,
+    identidade_incompleta: bool,
 ) -> ResultadoParte13:
     """Linhas 4411-4661 do JS fonte: FIX_AGRADECIMENTO_CONCLUIDO, FIX_TRIAGEM_AGENDA,
     FIX_TRIAGEM_SIM_AGENDA e FIX_MULTI_ENTIDADES (captura multi-entidade + validação contra a
@@ -5748,9 +5749,8 @@ def processar_agradecimento_triagem_multidados(
         "[PACIENTE JA IDENTIFICADO",
     )
     pode_override_pm = "[" not in tia_pm or any(t in tia_pm for t in override_pm)
-    identidade_incompleta_pm = not base.get("paciente_encontrado")
 
-    if em_coleta_pm and not identidade_incompleta_pm and pode_override_pm:
+    if em_coleta_pm and not identidade_incompleta and pode_override_pm:
         txt_pm2 = _norm(texto_usuario)
         txt_per_pm = re.sub(r"\bboa tarde\b|\bbom dia\b|\bboa noite\b", " ", txt_pm2)
 
@@ -6201,19 +6201,26 @@ def processar(
     )
     base, intencao_rapida, rota_agente = r9.base, r9.intencao_rapida, r9.rota_agente
 
-    r10 = processar_convenio_e_dia_deterministico(base, texto_usuario, intencao_rapida, rota_agente)
+    r10 = processar_convenio_e_dia_deterministico(
+        base, texto_usuario, intencao_rapida, rota_agente, identidade_incompleta_orq,
+    )
     base, intencao_rapida, rota_agente = r10.base, r10.intencao_rapida, r10.rota_agente
 
-    r11 = processar_convenio_omint_e_ultimo(base, texto_usuario, intencao_rapida, rota_agente, ia_output)
+    r11 = processar_convenio_omint_e_ultimo(
+        base, texto_usuario, intencao_rapida, rota_agente, ia_output, identidade_incompleta_orq,
+    )
     base, intencao_rapida, rota_agente = r11.base, r11.intencao_rapida, r11.rota_agente
 
     r12 = processar_particular_dados_med_triagem(
         base, texto_usuario, intencao_rapida, rota_agente, ia_output,
         r1.eh_texto_terceiro, r1.eh_mensagem_informativa, r1.eh_sessao_nova, r9.faq_tag,
+        identidade_incompleta_orq,
     )
     base, intencao_rapida, rota_agente = r12.base, r12.intencao_rapida, r12.rota_agente
 
-    r13 = processar_agradecimento_triagem_multidados(base, texto_usuario, intencao_rapida, rota_agente, ia_output)
+    r13 = processar_agradecimento_triagem_multidados(
+        base, texto_usuario, intencao_rapida, rota_agente, ia_output, identidade_incompleta_orq,
+    )
     base, intencao_rapida, rota_agente = r13.base, r13.intencao_rapida, r13.rota_agente
 
     r14 = processar_encerramento_e_pedido_humano(base, texto_usuario, intencao_rapida, rota_agente, ia_output)

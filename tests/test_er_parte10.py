@@ -30,8 +30,10 @@ def _base(**overrides):
     return b
 
 
-def _proc(texto, base=None, intencao_rapida="agenda", rota_agente=2):
-    return processar_convenio_e_dia_deterministico(base or _base(), texto, intencao_rapida, rota_agente)
+def _proc(texto, base=None, intencao_rapida="agenda", rota_agente=2, identidade_incompleta=False):
+    return processar_convenio_e_dia_deterministico(
+        base or _base(), texto, intencao_rapida, rota_agente, identidade_incompleta,
+    )
 
 
 # ---------- FIX_PORTO_ITAU_DETERMINISTIC ----------
@@ -42,6 +44,30 @@ def test_porto_seguro_com_coleta_completa_busca_direto():
     assert r.rota_agente == 4
     assert r.base["coleta_convenio"] == "Porto Seguro"
     assert "CONV ACEITO + BUSCAR AGENDA" in r.base["texto_ia"]
+
+
+def test_porto_seguro_busca_direto_mesmo_sem_match_tisaude_se_identidade_ja_coletada():
+    # Regressão exec 67708 (replay 12/07-13/07, 96% concordância): paciente_encontrado=False
+    # (TiSaude não achou o CPF ainda) mas nome/CPF/nascimento do dependente já foram coletados
+    # — _identidadeIncompleta real (JS linha 1549) é False nesse caso, não True. O port tinha um
+    # bug: recomputava `not paciente_encontrado` local em vez de usar o valor threaded do
+    # orquestrador, then bloqueava o atalho pra buscar_agenda incorretamente.
+    b = _base(
+        coleta_unidade="Tatuapé", coleta_medico="Dr. Jose Emmanuel Burle Neto",
+        coleta_data="2026-07-14", coleta_periodo="manha", paciente_encontrado=False,
+    )
+    r = _proc("Convênio porto seguro prata rcq mais", base=b, rota_agente=2, identidade_incompleta=False)
+    assert r.rota_agente == 4
+    assert r.base["coleta_convenio"] == "Porto Seguro"
+    assert "CONV ACEITO + BUSCAR AGENDA" in r.base["texto_ia"]
+
+
+def test_porto_seguro_nao_busca_direto_se_identidade_realmente_incompleta():
+    b = _base(coleta_unidade="Vila Olímpia", coleta_data="2026-07-20", coleta_periodo="tarde")
+    r = _proc("tenho porto seguro", base=b, rota_agente=2, identidade_incompleta=True)
+    assert r.rota_agente == 2
+    assert "CONV ACEITO + BUSCAR AGENDA" not in r.base["texto_ia"]
+    assert "CONV ACEITO: Porto Seguro" in r.base["texto_ia"]
 
 
 # ---------- FIX_QUALQUER_UM_MODO2 ----------

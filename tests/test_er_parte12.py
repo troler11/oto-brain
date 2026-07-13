@@ -30,11 +30,12 @@ def _base(**overrides):
 
 
 def _proc(texto, base=None, intencao_rapida="triagem", rota_agente=2, ia_output=None,
-          eh_texto_terceiro=False, eh_mensagem_informativa=False, eh_sessao_nova=False, faq_tag=""):
+          eh_texto_terceiro=False, eh_mensagem_informativa=False, eh_sessao_nova=False, faq_tag="",
+          identidade_incompleta=False):
     io = ia_output if ia_output is not None else {}
     r = processar_particular_dados_med_triagem(
         base or _base(), texto, intencao_rapida, rota_agente, io,
-        eh_texto_terceiro, eh_mensagem_informativa, eh_sessao_nova, faq_tag,
+        eh_texto_terceiro, eh_mensagem_informativa, eh_sessao_nova, faq_tag, identidade_incompleta,
     )
     return r, io
 
