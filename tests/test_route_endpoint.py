@@ -24,6 +24,7 @@ def test_route_chama_pipeline_e_devolve_resultado():
     with patch("app.main.get_connection") as mock_conn, \
          patch("app.main.carregar_sessao", return_value=None), \
          patch("app.main.carregar_historico_conversa", return_value=[]), \
+         patch("app.main.carregar_memoria_paciente", return_value=None), \
          patch("app.main.processar_turno", return_value=resultado) as mock_pipeline:
         mock_conn.return_value.__enter__.return_value = MagicMock()
         r = client.post("/route", json=PAYLOAD)
@@ -40,6 +41,7 @@ def test_route_chama_pipeline_e_devolve_resultado():
     assert kwargs["mensagem_agrupada"] == "oi"
     assert kwargs["sessao"] is None
     assert kwargs["historico"] == []
+    assert kwargs["memoria_paciente"] is None
 
 
 def test_route_passa_sessao_e_historico_carregados_pro_pipeline():
@@ -52,6 +54,7 @@ def test_route_passa_sessao_e_historico_carregados_pro_pipeline():
     with patch("app.main.get_connection") as mock_conn, \
          patch("app.main.carregar_sessao", return_value=sessao), \
          patch("app.main.carregar_historico_conversa", return_value=historico), \
+         patch("app.main.carregar_memoria_paciente", return_value=None), \
          patch("app.main.processar_turno", return_value=resultado) as mock_pipeline:
         mock_conn.return_value.__enter__.return_value = MagicMock()
         r = client.post("/route", json=PAYLOAD)
@@ -75,6 +78,7 @@ def test_route_5_sem_agente_devolve_agente_usado_none():
     with patch("app.main.get_connection") as mock_conn, \
          patch("app.main.carregar_sessao", return_value=None), \
          patch("app.main.carregar_historico_conversa", return_value=[]), \
+         patch("app.main.carregar_memoria_paciente", return_value=None), \
          patch("app.main.processar_turno", return_value=resultado):
         mock_conn.return_value.__enter__.return_value = MagicMock()
         r = client.post("/route", json={**PAYLOAD, "mensagem_agrupada": "queria um encaixe"})

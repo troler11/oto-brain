@@ -53,6 +53,7 @@ def processar_turno(
     mensagem_agrupada: str,
     historico: list[dict],
     has_media: bool = False,
+    memoria_paciente: dict | None = None,
     openai_client: OpenAI | None = None,
 ) -> ResultadoTurno:
     mc = montar_contexto.processar(
@@ -60,6 +61,11 @@ def processar_turno(
         sessao, whatsapp_info, mensagem_agrupada,
     )
     base_mc = mc.to_dict()
+    # Campo extra, fora do port fiel de Montar Contexto — bootstrap Fase 4 (paciente_memoria,
+    # carregar_memoria_paciente). Fica disponível pro template engine ({{ $('Montar
+    # Contexto').first().json.memoria_paciente... }}) mas nenhum prompt referencia ainda —
+    # inerte até essa mudança ser proposta e aprovada (regra de prompt/fluxo do CLAUDE.local.md).
+    base_mc["memoria_paciente"] = memoria_paciente
 
     ia_output = classificar_intencao(
         {

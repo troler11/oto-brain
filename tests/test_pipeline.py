@@ -104,3 +104,18 @@ def test_turno_passa_historico_pro_agente():
     mensagens = kwargs_agente["messages"]
     assert {"role": "user", "content": "mensagem antiga"} in mensagens
     assert {"role": "assistant", "content": "resposta antiga"} in mensagens
+
+
+def test_turno_repassa_memoria_paciente_pro_base_final():
+    ia_output = IAOutputClassificador(intencao_rapida="triagem", rota_agente=0)
+    resposta_agente = RespostaAgente(mensagem="ok", estado=EstadoConsulta(i="triagem"))
+    client = _mock_client(ia_output, resposta_agente)
+    memoria = {"ultimo_medico": "Dra. Giseli Rebechi", "ultima_unidade": "Vila Olímpia"}
+
+    r = processar_turno(
+        busca_paciente_id1=None, busca_paciente_telefone=None, extrair_medico_timeline=None,
+        sessao=None, whatsapp_info=WA_INFO, mensagem_agrupada="oi", historico=[],
+        memoria_paciente=memoria, openai_client=client,
+    )
+
+    assert r.base_final.get("memoria_paciente") == memoria

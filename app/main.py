@@ -2,7 +2,7 @@ import logging
 
 from fastapi import FastAPI
 
-from app.db import carregar_historico_conversa, carregar_sessao, get_connection, gravar_turno
+from app.db import carregar_historico_conversa, carregar_memoria_paciente, carregar_sessao, get_connection, gravar_turno
 from app.pipeline import processar_turno
 from app.schemas import LogTurnoIn, RouteIn, RouteOut
 
@@ -24,6 +24,7 @@ def route(turno: RouteIn) -> RouteOut:
     with get_connection() as conn:
         sessao = carregar_sessao(conn, turno.telefone)
         historico = carregar_historico_conversa(conn, turno.telefone)
+        memoria_paciente = carregar_memoria_paciente(conn, turno.telefone)
 
     resultado = processar_turno(
         busca_paciente_id1=turno.busca_paciente_id1,
@@ -34,6 +35,7 @@ def route(turno: RouteIn) -> RouteOut:
         mensagem_agrupada=turno.mensagem_agrupada,
         historico=historico,
         has_media=turno.has_media,
+        memoria_paciente=memoria_paciente,
     )
     return RouteOut(
         mensagem=resultado.mensagem,

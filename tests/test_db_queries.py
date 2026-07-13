@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 from app.db import (
     carregar_historico_conversa,
+    carregar_memoria_paciente,
     carregar_sessao,
     computar_params_salvar_sessao,
     resetar_sessao,
@@ -96,6 +97,30 @@ def test_carregar_historico_humano_via_enviado_por_vira_assistant():
     assert carregar_historico_conversa(conn, "5511999999999") == [
         {"role": "assistant", "content": "Vou te conectar"},
     ]
+
+
+# ---------- carregar_memoria_paciente ----------
+
+def test_carregar_memoria_paciente_retorna_row():
+    conn, cur = _mock_conn()
+    cur.fetchone.return_value = {
+        "nome_titular": "Maria Silva", "cpf_titular": "12345678900",
+        "ultimo_medico": "Dra. Giseli Rebechi", "ultima_unidade": "Vila Olímpia",
+        "ultimo_convenio": "Porto Seguro", "ultimo_periodo": "tarde",
+        "ultima_data_consulta": "2026-06-01", "total_agendamentos": 3,
+    }
+    r = carregar_memoria_paciente(conn, "5511999999999")
+    assert r["ultimo_medico"] == "Dra. Giseli Rebechi"
+    sql, params = cur.execute.call_args.args
+    assert "FROM paciente_memoria" in sql
+    assert "RIGHT(regexp_replace(telefone" in sql
+    assert params == {"telefone": "5511999999999"}
+
+
+def test_carregar_memoria_paciente_sem_linha_retorna_none():
+    conn, cur = _mock_conn()
+    cur.fetchone.return_value = None
+    assert carregar_memoria_paciente(conn, "5511999999999") is None
 
 
 # ---------- salvar_coleta_steps ----------

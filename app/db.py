@@ -165,6 +165,29 @@ def carregar_historico_conversa(conn: psycopg.Connection, telefone: str, limite:
     return _historico_para_mensagens(rows)
 
 
+def carregar_memoria_paciente(conn: psycopg.Connection, telefone: str) -> dict | None:
+    """Preferências consolidadas do paciente (`paciente_memoria`, bootstrap Fase 4 —
+    scripts/build_paciente_memoria.py, derivado de contatos_whatsapp+agendamentos). Tolerante a
+    prefixo "55" (RIGHT(...,11), mesmo padrão de carregar_sessao/FIX_66787b) — a tabela é
+    alimentada a partir de contatos_whatsapp.telefone, que pode ou não ter o prefixo.
+    Identifica o paciente só pelo telefone do WhatsApp, sem depender de busca por CPF/ID
+    TiSaude já ter rodado — diferente de `ultimo_medico` em app.montar_contexto (que só existe
+    depois que `Extrair Medico Timeline1` já resolveu o paciente na API ao vivo)."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT nome_titular, cpf_titular, ultimo_medico, ultima_unidade, ultimo_convenio,
+                   ultimo_periodo, ultima_data_consulta, total_agendamentos
+            FROM paciente_memoria
+            WHERE RIGHT(regexp_replace(telefone, '\\D', '', 'g'), 11)
+                = RIGHT(regexp_replace(%(telefone)s, '\\D', '', 'g'), 11)
+            LIMIT 1;
+            """,
+            {"telefone": telefone},
+        )
+        return cur.fetchone()
+
+
 def salvar_coleta_steps(
     conn: psycopg.Connection,
     telefone: str,
