@@ -46,9 +46,15 @@ def test_turno_triagem_simples_chama_classificador_e_agente_triagem():
     assert client.beta.chat.completions.parse.call_count == 2
 
 
-def test_turno_rota_5_retorna_cedo_sem_chamar_agente():
+def test_turno_rota_5_bypass_humano_chama_agente_humano():
+    # FIX_ROTA5_PRIORIDADE_HUMANO: "encaixe" é rota_agente==5 só como reaproveitamento do
+    # atalho determinístico — intencao_rapida=="humano" tem prioridade, tem que cair no
+    # agente_humano (igual app.dispatcher.escolher_agente já fazia), não retornar cedo vazio.
     ia_output = IAOutputClassificador(intencao_rapida="triagem", rota_agente=0)
-    client = _mock_client(ia_output)  # só 1 resultado — se despachar_turno for chamado, StopIteration
+    resposta_agente = RespostaAgente(
+        mensagem="Vou te passar para uma atendente! 😊", estado=EstadoConsulta(i="humano"),
+    )
+    client = _mock_client(ia_output, resposta_agente)
 
     r = processar_turno(
         busca_paciente_id1=None, busca_paciente_telefone=None, extrair_medico_timeline=None,
@@ -57,8 +63,23 @@ def test_turno_rota_5_retorna_cedo_sem_chamar_agente():
     )
 
     assert r.rota_agente == 5
+    assert r.agente_usado == "humano"
+    assert "atendente" in r.mensagem
+    assert client.beta.chat.completions.parse.call_count == 2
+
+
+def test_turno_rota_5_confirmar_presenca_retorna_cedo_sem_chamar_agente():
+    ia_output = IAOutputClassificador(intencao_rapida="triagem", rota_agente=0)
+    client = _mock_client(ia_output)  # só 1 resultado — se despachar_turno for chamado, StopIteration
+
+    r = processar_turno(
+        busca_paciente_id1=None, busca_paciente_telefone=None, extrair_medico_timeline=None,
+        sessao=None, whatsapp_info=WA_INFO, mensagem_agrupada="quero confirmar presença",
+        historico=[], openai_client=client,
+    )
+
+    assert r.rota_agente == 5
     assert r.agente_usado is None
-    assert r.mensagem == ""
     assert client.beta.chat.completions.parse.call_count == 1
 
 

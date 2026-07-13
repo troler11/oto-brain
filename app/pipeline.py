@@ -13,20 +13,25 @@ intencao`/`chamar_agente`, via `openai_client` injetável) faz IO de verdade. Qu
 histórico no Postgres é `app.main` (o endpoint HTTP), não este módulo — mesma separação
 pura/IO do resto do port (ex.: `app.er` vs `scripts/replay_offline.py`).
 
-rota_agente == 5 (confirmar presença) NÃO é tratado aqui: é 100% determinístico
-(`app.formatar_verificar_confirmar`) mas depende de uma tool TiSaude (buscar consultas do
-paciente) que este pipeline ainda não tem acesso direto — fica pro caminho legado do n8n até
-essa tool ganhar um client Python (fase seguinte do plano). `processar_turno()` retorna cedo
-com `rota_agente=5` e `agente_usado=None` nesse caso, pra quem chamar decidir o fallback.
+rota_agente == 5 (confirmar presença) é 100% determinístico (`app.formatar_verificar_confirmar`,
+orquestrado por `app.confirmar_presenca_fluxo`), ligado à tool TiSaude real desde 13/07/2026 —
+mas só LEITURA (buscar consultas): a mutação real (`tisaude.confirmar_presenca`) fica pendente
+do cutover (Fase 2, `/route` ainda roda em shadow — ver docstring de
+app.confirmar_presenca_fluxo). Sub-casos que na verdade são bypass pra humano (encaixe, lista de
+espera — `base['_sub_confirmar']` não setado) continuam sem tratamento aqui (ver achado
+separado, `intencao_rapida=="humano"` deveria ter prioridade sobre o corte de rota==5, igual já
+acontece em `app.dispatcher.escolher_agente` — pendente de decisão do Lucas).
+`processar_turno()` retorna cedo com `rota_agente=5` e `agente_usado=None` nesse caso.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
+import httpx
 from openai import OpenAI
 
-from app import dispatcher, eif1, er, injetar_contexto_agendamento, montar_contexto, preparar_input_agenda, state_validator
+from app import confirmar_presenca_fluxo, dispatcher, eif1, er, injetar_contexto_agendamento, montar_contexto, preparar_input_agenda, state_validator
 from app.agentes import classificar_intencao, empacotar_para_eif1
 
 
@@ -55,6 +60,7 @@ def processar_turno(
     has_media: bool = False,
     memoria_paciente: dict | None = None,
     openai_client: OpenAI | None = None,
+    tisaude_client: httpx.Client | None = None,
 ) -> ResultadoTurno:
     mc = montar_contexto.processar(
         busca_paciente_id1, busca_paciente_telefone, extrair_medico_timeline,
@@ -79,9 +85,17 @@ def processar_turno(
 
     r = er.processar(dict(base_mc), mensagem_agrupada, ia_output, whatsapp_info, has_media)
 
-    if r.rota_agente == 5:
+    # FIX_ROTA5_PRIORIDADE_HUMANO: rota_agente==5 é reusado tanto pro fluxo real de confirmar
+    # presença quanto pra bypass determinístico pra humano (encaixe, lista de espera,
+    # agendamento duplo — ver app.er). intencao_rapida=="humano" tem prioridade sobre rota==5,
+    # igual app.dispatcher.escolher_agente() já respeita — sem esse guard aqui, esses 3 casos
+    # voltavam mensagem vazia em vez de cair no agente_humano (achado 13/07/2026, revisão do
+    # wiring do confirmar_presenca_fluxo).
+    if r.rota_agente == 5 and r.intencao_rapida != "humano":
+        resultado_rota5 = confirmar_presenca_fluxo.processar_rota5(r.base, client=tisaude_client)
+        mensagem_rota5 = resultado_rota5.get("output", "") if resultado_rota5 else ""
         return ResultadoTurno(
-            mensagem="", intencao="confirmar_presenca", sv_result="", sv_reason="",
+            mensagem=mensagem_rota5, intencao="confirmar_presenca", sv_result="", sv_reason="",
             rota_agente=5, agente_usado=None, deve_resetar_sessao=r.deve_resetar_sessao,
             base_final=r.base,
         )
