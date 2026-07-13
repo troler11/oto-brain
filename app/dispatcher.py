@@ -36,14 +36,24 @@ from app.agentes import RespostaAgente, chamar_agente
 from app.er import ResultadoER
 from app.regras_clinica import aplicar_regras
 from app.template_engine import renderizar
-from app.tools_agenda import TOOLS_AGENDA, construir_executores
+from app.tools_agenda import TOOLS_AGENDA
+from app.tools_agenda import construir_executores as construir_executores_agenda
+from app.tools_triagem import TOOLS_TRIAGEM
+from app.tools_triagem import construir_executores as construir_executores_triagem
 
-# Agentes que ganham as tools reais de agenda (buscar_agenda/navegar_agenda) quando `conn` é
-# passado. "agenda" e "navegacao" confirmados via get_workflow_details 13/07/2026 — os nós
-# "Agente Agenda" e "Agente Navegacao" apontam pros MESMOS dois sub-workflows
-# (gMQaU2CQbwdPUnUA/iSO191fJ9Q1FMmVZ), schema idêntico (só descrição de dia_semana com redação
-# diferente, semântica igual). "confirmacao"/"executor" ainda não investigados.
-_AGENTES_COM_TOOLS_AGENDA = {"agenda", "navegacao"}
+# Tool sets por agente, ligados quando `conn` é passado. "agenda"/"navegacao" confirmados via
+# get_workflow_details 13/07/2026 — os nós "Agente Agenda" e "Agente Navegacao" apontam pros
+# MESMOS dois sub-workflows (gMQaU2CQbwdPUnUA/iSO191fJ9Q1FMmVZ), schema idêntico (só descrição
+# de dia_semana com redação diferente, semântica igual). "triagem" usa consultar_minhas_consultas
+# (sub-workflow iOhQPjizddY88k4K), 100% leitura, sem Postgres — o executor ignora `conn`, mas o
+# gate de ligar/não ligar continua sendo a presença de `conn` (mesmo sinal usado em todo o
+# resto). "confirmacao"/"executor"/"cancelamento" têm tool de MUTAÇÃO (cancelar_consulta) —
+# travados até o cutover (Fase 2), não entram aqui de propósito.
+_TOOL_SETS = {
+    "agenda": (TOOLS_AGENDA, construir_executores_agenda),
+    "navegacao": (TOOLS_AGENDA, construir_executores_agenda),
+    "triagem": (TOOLS_TRIAGEM, lambda conn, tisaude_client: construir_executores_triagem(tisaude_client)),
+}
 
 PASTA_PROMPTS = Path(__file__).resolve().parent.parent / "prompts"
 
@@ -118,17 +128,18 @@ def despachar_turno(
     `app.preparar_input_agenda` antes de chegar aqui — fiação de quem monta o pipeline
     completo, não desta função.
 
-    `conn` (13/07/2026, Fase 3 peça C): quando passado E o agente é um dos
-    `_AGENTES_COM_TOOLS_AGENDA`, liga as tools reais `buscar_agenda`/`navegar_agenda`
-    (`app.tools_agenda`) no loop de function-calling — sem `conn` (todo o resto/testes
-    existentes), comportamento idêntico a antes, sem tools."""
+    `conn` (13/07/2026, Fase 3 peça C): quando passado E o agente tem um tool set em
+    `_TOOL_SETS`, liga as tools reais correspondentes no loop de function-calling — sem `conn`
+    (todo o resto/testes existentes), comportamento idêntico a antes, sem tools."""
     agente = escolher_agente(resultado, n_pacientes)
     if agente is None:
         return None
     prompt = renderizar(carregar_prompt(agente), base_mc, resultado.base)
-    if conn is not None and agente in _AGENTES_COM_TOOLS_AGENDA:
+    tool_set = _TOOL_SETS.get(agente)
+    if conn is not None and tool_set is not None:
+        tools, construir_executores = tool_set
         resposta = chamar_agente(
-            prompt, mensagens, client=client, tools=TOOLS_AGENDA,
+            prompt, mensagens, client=client, tools=tools,
             executores=construir_executores(conn, tisaude_client),
         )
     else:

@@ -161,6 +161,17 @@ def test_despachar_turno_com_conn_liga_tools_pro_agente_navegacao():
     assert nomes == {"buscar_agenda", "navegar_agenda"}
 
 
+def test_despachar_turno_com_conn_liga_tool_pro_agente_triagem():
+    esperado = RespostaAgente(mensagem="ok", estado=EstadoConsulta(i="triagem"))
+    client = _mock_client(esperado)
+    client.beta.chat.completions.parse.return_value.choices[0].message.tool_calls = None
+    conn = MagicMock()
+    despachar_turno(_resultado(rota_agente=0), [], base_mc={}, client=client, conn=conn)
+    kwargs = client.beta.chat.completions.parse.call_args.kwargs
+    nomes = {t["function"]["name"] for t in kwargs["tools"]}
+    assert nomes == {"consultar_minhas_consultas"}
+
+
 def test_despachar_turno_com_conn_nao_liga_tools_pra_confirmacao_ainda():
     # "confirmacao"/"executor" ainda não investigados — não assumir sem checar.
     esperado = RespostaAgente(mensagem="ok", estado=EstadoConsulta(i="confirmacao"))
