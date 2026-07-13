@@ -4,14 +4,14 @@ lido via `get_workflow_details` 13/07/2026.
 
 ⚠️ Simplificação documentada: 'Extrair IDs Dinamicos2' resolve idLocal/idCalendar do médico
 chamando primeiro 'Chama Busca de Agenda1' (sub-workflow `qRGPjB7wruHgtQUu`, NUNCA aberto/
-investigado) e então a MESMA lógica de match (normaliza, tira título, includes bidirecional,
-fallback por tokens, contingência só pra "sem preferência", erro se nomeado sem match — o exato
-fix do exec 65707) que `app.tisaude.resolver_medico` já é o port fiel de (docstring de
-`resolver_medico`: "Réplica de 'Extrair IDs Dinamicos2' (Criar Consulta Terceiro)"). Como o
-idCalendar de um médico não muda por dia, usar `tisaude.medicos_por_unidade()` +
-`tisaude.resolver_medico()` direto é EQUIVALENTE ao resultado de chamar o sub-workflow de busca
-só pra extrair esses 2 IDs — evita portar um 4º sub-workflow nunca visto só pra chegar no mesmo
-lugar que uma função já portada e testada resolve.
+investigado) e então o match por nome — port fiel já existente em
+`app.tool_criar_ids_dinamicos.processar()` (achado 13/07/2026, revisão pós-implementação: essa
+função já existia de uma fase anterior da migração e é EXATAMENTE o que faltava aqui — eu tinha
+recriado a mesma lógica via `tisaude.resolver_medico`, agora trocado por reusar o módulo certo).
+Como o idCalendar de um médico não muda por dia, alimentar `tool_criar_ids_dinamicos.processar()`
+com a lista de `tisaude.medicos_por_unidade()` (aceita lista flat direto, ver
+`_extrair_lista_medicos`) é EQUIVALENTE ao resultado de chamar o sub-workflow de busca só pra
+extrair esses 2 IDs — evita portar um 4º sub-workflow nunca visto.
 
 ⚠️ Bug preservado FIELMENTE do JS original ('Cria fila', campo `para_terceiro`): a condição é
 `$query.terceiro ? false : true` — como `terceiro` chega como STRING ("terceiro_true"/
@@ -33,7 +33,7 @@ import re
 import httpx
 import psycopg
 
-from app import tisaude
+from app import tisaude, tool_criar_ids_dinamicos
 
 
 def _extrair_celular_criar_paciente(telefone_bruto: str) -> str:
@@ -87,18 +87,12 @@ def criar_consulta_completo(
     token = tisaude.login(client=tisaude_client)
 
     medicos = tisaude.medicos_por_unidade(unidade, token, client=tisaude_client)
-    medico_resolvido = tisaude.resolver_medico(nome_medico_escolhido, medicos)
-    if medico_resolvido is None:
-        return {
-            "erro": "MEDICO_NAO_ENCONTRADO",
-            "resultado": (
-                f'MEDICO_NAO_ENCONTRADO: "{nome_medico_escolhido}" nao esta na agenda retornada para essa '
-                "data/unidade. NAO agende. Informe o paciente que o horario nao esta mais disponivel para "
-                "esse medico e ofereca buscar novamente ou falar com um atendente."
-            ),
-        }
-    id_local = medico_resolvido.get("idLocal") or tisaude.resolver_id_local(unidade)
-    id_calendar = medico_resolvido["idCalendar"]
+    try:
+        ids = tool_criar_ids_dinamicos.processar({"nome_medico_escolhido": nome_medico_escolhido}, medicos)
+    except tool_criar_ids_dinamicos.MedicoNaoEncontrado as e:
+        return {"erro": "MEDICO_NAO_ENCONTRADO", "resultado": str(e)}
+    id_local = ids["idLocal_dinamico"]
+    id_calendar = ids["idCalendar_dinamico"]
 
     pacientes_existentes = tisaude.buscar_paciente_por_cpf(cpf_paciente, token, client=tisaude_client)
     if not pacientes_existentes:

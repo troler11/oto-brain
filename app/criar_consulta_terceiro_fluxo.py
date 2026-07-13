@@ -2,9 +2,10 @@
 Port fiel do sub-workflow n8n 'Ferramenta - Criar Consulta Terceiro' (id `xfpTs6C4BmnXs3jB`),
 lido via `get_workflow_details` 13/07/2026 — espelho de `app.criar_consulta_fluxo` pra agendar
 em nome de um DEPENDENTE (titular liga pro filho/cônjuge/etc), mesmas simplificações/bugs
-documentados lá (resolução de médico via `tisaude.resolver_medico`+`medicos_por_unidade` em vez
-de portar o mesmo 4º sub-workflow nunca aberto; `para_terceiro` com o mesmo bug de truthy-string
-do JS original).
+documentados lá (resolução de médico via `app.tool_criar_ids_dinamicos.processar()` — port fiel
+já existente de fase anterior da migração, alimentado com `medicos_por_unidade()` em vez de
+portar o mesmo 4º sub-workflow nunca aberto). `para_terceiro` sai sempre `True` aqui — ver
+docstring de `_inserir_agendamento_fila_terceiro` abaixo.
 
 ⚠️ Bug ADICIONAL encontrado só neste workflow (não corrigido, só documentado — mesma disciplina
 do resto da migração): o node 'Buscar Terceiro no Banco1' consulta `terceiros_agendamento` pra
@@ -34,7 +35,7 @@ from __future__ import annotations
 import httpx
 import psycopg
 
-from app import tisaude
+from app import tisaude, tool_criar_ids_dinamicos
 from app.criar_consulta_fluxo import (
     _extrair_celular_criar_paciente,
     _normalizar_nascimento_pg,
@@ -67,18 +68,12 @@ def criar_consulta_terceiro_completo(
     token = tisaude.login(client=tisaude_client)
 
     medicos = tisaude.medicos_por_unidade(unidade, token, client=tisaude_client)
-    medico_resolvido = tisaude.resolver_medico(nome_medico_escolhido, medicos)
-    if medico_resolvido is None:
-        return {
-            "erro": "MEDICO_NAO_ENCONTRADO",
-            "resultado": (
-                f'MEDICO_NAO_ENCONTRADO: "{nome_medico_escolhido}" nao esta na agenda retornada para essa '
-                "data/unidade. NAO agende. Informe o paciente que o horario nao esta mais disponivel para "
-                "esse medico e ofereca buscar novamente ou falar com um atendente."
-            ),
-        }
-    id_local = medico_resolvido.get("idLocal") or tisaude.resolver_id_local(unidade)
-    id_calendar = medico_resolvido["idCalendar"]
+    try:
+        ids = tool_criar_ids_dinamicos.processar({"nome_medico_escolhido": nome_medico_escolhido}, medicos)
+    except tool_criar_ids_dinamicos.MedicoNaoEncontrado as e:
+        return {"erro": "MEDICO_NAO_ENCONTRADO", "resultado": str(e)}
+    id_local = ids["idLocal_dinamico"]
+    id_calendar = ids["idCalendar_dinamico"]
 
     pacientes_existentes = tisaude.buscar_paciente_por_cpf(cpf_dependente, token, client=tisaude_client)
     if not pacientes_existentes:
