@@ -3,8 +3,17 @@ Port fiel de dois nós de aviso pequenos e independentes (Fase 1 do plano de mig
 C:\\Users\\lucas\\.claude\\plans\\unified-coalescing-puppy.md):
   - `aviso_sucesso()` — DEPLOY/Aviso_Sucesso1.js (5 linhas): passthrough puro do texto que o
     EIF1 já gerou (o comentário do JS existe só pra registrar que ISSO NÃO é hardcoded).
-  - `aviso_transferencia()` — DEPLOY/Aviso_Transferencia1.js (31 linhas): menu principal (6
-    opções) exibido ao transferir/reabrir a triagem, saudando pelo primeiro nome se conhecido.
+  - `aviso_transferencia()` — menu principal (4 opções) exibido ao transferir/reabrir a
+    triagem, saudando pelo primeiro nome se conhecido.
+
+⚠️ CORREÇÃO (13/07/2026, `get_workflow_details` direto no node `Aviso Transferencia1` real —
+achado numa auditoria de fechamento): a versão anterior deste port tinha 6 opções (incluía
+"4️⃣ Consulta pendente" e "6️⃣ Confirmar consulta"), copiadas do arquivo `DEPLOY/
+Aviso_Transferencia1.js`, que estava DESATUALIZADO em relação ao node real hoje em produção — o
+node real tem só 4 opções (Agendar/Remarcar/Cancelar/Troca de guias e documentos). Corrigido pra
+bater com o node ao vivo, não com o snapshot do DEPLOY. Nunca esteve ligado a nenhum
+dispatcher/agente (código órfão desde que foi portado), então não havia risco de produção — só
+corrigido antes que alguém ligue.
 """
 
 from __future__ import annotations
@@ -28,8 +37,6 @@ def aviso_transferencia(extrair_rota: dict, pacientes: list[dict] | None) -> dic
         "1️⃣ Agendar consulta\n"
         "2️⃣ Remarcar consulta\n"
         "3️⃣ Cancelar consulta\n"
-        "4️⃣ Consulta pendente\n"
-        "5️⃣ Troca de guias e documentos\n"
-        "6️⃣ Confirmar consulta"
+        "4️⃣ Troca de guias e documentos"
     )
     return {**base, "mensagem_final": mensagem}

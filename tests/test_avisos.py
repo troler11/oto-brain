@@ -18,7 +18,8 @@ def test_aviso_sucesso_sem_dados():
 def test_aviso_transferencia_com_paciente_sauda_pelo_primeiro_nome():
     r = aviso_transferencia({"telefone": "5511999999999"}, [{"nome": "Lucas Bueno"}])
     assert r["mensagem_final"].startswith("Olá, Lucas! 👋")
-    assert "6️⃣ Confirmar consulta" in r["mensagem_final"]
+    assert "4️⃣ Troca de guias e documentos" in r["mensagem_final"]
+    assert "5️⃣" not in r["mensagem_final"]
     assert r["telefone"] == "5511999999999"
 
 
