@@ -31,6 +31,14 @@ BUSCAR_AGENDA_SCHEMA = {
             "🛑 NÃO USE se o cache estiver ativo (✅) — use navegar_agenda diretamente.\n"
             "Use APENAS quando: sem cache, troca de médico, troca de unidade, ou cache esgotado."
         ),
+        # `strict: true` + `additionalProperties: false` são exigidos pelo client.beta.chat.
+        # completions.parse() da OpenAI pra tools coexistirem com response_format (structured
+        # output) — descoberto na validação manual 13/07/2026 (ValueError: "only strict function
+        # tools can be auto-parsed"), não documentado nos schemas originais do n8n (LangChain
+        # tool node não passa por essa validação). Campos opcionais no JS (`horario_preferencia`/
+        # `dia_semana`/`data` em ir_para) viram `["string","null"]` + `required` — convenção do
+        # modo strict, que não aceita propriedade ausente sem estar em `required`.
+        "strict": True,
         "parameters": {
             "type": "object",
             "properties": {
@@ -39,10 +47,11 @@ BUSCAR_AGENDA_SCHEMA = {
                 "medico": {"type": "string", "description": "nome ou 'sem preferência'"},
                 "periodo": {"type": "string", "description": "manha/tarde/noite"},
                 "telefone_paciente": {"type": "string", "description": "só dígitos, telefone do titular"},
-                "horario_preferencia": {"type": "string", "description": "hora específica ou ''"},
-                "dia_semana": {"type": "string", "description": "segunda..sexta (obrigatório em modos 2/3)"},
+                "horario_preferencia": {"type": ["string", "null"], "description": "hora específica ou null"},
+                "dia_semana": {"type": ["string", "null"], "description": "segunda..sexta (obrigatório em modos 2/3), null se não aplicável"},
             },
-            "required": ["unidade", "data", "medico", "periodo", "telefone_paciente"],
+            "required": ["unidade", "data", "medico", "periodo", "telefone_paciente", "horario_preferencia", "dia_semana"],
+            "additionalProperties": False,
         },
     },
 }
@@ -58,15 +67,17 @@ NAVEGAR_AGENDA_SCHEMA = {
             "buscar_agenda. Paciente pediu data específica (dia 23, 30/06) → use ir_para com "
             "data=YYYY-MM-DD."
         ),
+        "strict": True,
         "parameters": {
             "type": "object",
             "properties": {
                 "acao": {"type": "string", "enum": ["ver", "avancar", "voltar", "ir_para"]},
                 "telefone_paciente": {"type": "string", "description": "só dígitos"},
                 "unidade": {"type": "string", "description": "Vila Olímpia ou Tatuapé"},
-                "data": {"type": "string", "description": "YYYY-MM-DD, obrigatório só se acao=ir_para"},
+                "data": {"type": ["string", "null"], "description": "YYYY-MM-DD, obrigatório só se acao=ir_para, null caso contrário"},
             },
-            "required": ["acao", "telefone_paciente", "unidade"],
+            "required": ["acao", "telefone_paciente", "unidade", "data"],
+            "additionalProperties": False,
         },
     },
 }
