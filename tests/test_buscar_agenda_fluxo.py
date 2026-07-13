@@ -29,6 +29,12 @@ def test_limpar_nome_medico_dr_a_titulo():
     assert _limpar_nome_medico("Dr(a). Elias Braga") == "elias braga"
 
 
+def test_limpar_nome_medico_colapsa_letra_dobrada():
+    # FIX_LETRA_DOBRADA (exec 70777): "Ruggeri" (LLM) vs "Rugeri" (TiSaude real).
+    assert _limpar_nome_medico("Ruggeri") == "rugeri"
+    assert _limpar_nome_medico("Broetto") == "broeto"
+
+
 # ---------- _filtrar_medicos_por_preferencia ----------
 
 MEDICOS = [{"idCalendar": 1, "medico": "Giseli Rebechi"}, {"idCalendar": 2, "medico": "Elias Lobo Braga"}]
@@ -49,6 +55,14 @@ def test_filtrar_medicos_com_preferencia_filtra():
 
 def test_filtrar_medicos_sem_match_retorna_vazio():
     assert _filtrar_medicos_por_preferencia(MEDICOS, "Stephanie") == []
+
+
+def test_filtrar_medicos_tolera_letra_dobrada_do_llm():
+    # exec 70777: LLM pediu "Stephanie Ruggeri" (2 g), médica real na TiSaude é "Stephanie
+    # Rugeri de Souza" (1 g) — sem o fix, filtrava pra zero e a busca real morria.
+    medicos = MEDICOS + [{"idCalendar": 6, "medico": "Stephanie Rugeri de Souza"}]
+    r = _filtrar_medicos_por_preferencia(medicos, "Stephanie Ruggeri")
+    assert r == [medicos[2]]
 
 
 # ---------- _normalizar_telefone_busca ----------

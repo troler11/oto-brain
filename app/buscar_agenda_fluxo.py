@@ -59,6 +59,11 @@ def _limpar_nome_medico(t: str) -> str:
         return ""
     limpo = "".join(c for c in unicodedata.normalize("NFD", str(t).lower()) if unicodedata.category(c) != "Mn")
     limpo = re.sub(r"^(dr\(a\)\.?\s+|dra?\.?\s+)", "", limpo)
+    # FIX_LETRA_DOBRADA (achado 13/07/2026, exec 70777): LLM grafou "Ruggeri" (2 g), TiSaude
+    # tem "Rugeri" (1 g) — match por substring falhava, zerava os médicos, sub-workflow real
+    # (node "Separar Medicos2") morria sem resposta. Colapsar letra consecutiva dobrada nos dois
+    # lados da comparação resolve sem risco de colisão entre os médicos atuais da clínica.
+    limpo = re.sub(r"(.)\1+", r"\1", limpo)
     return limpo.strip()
 
 
