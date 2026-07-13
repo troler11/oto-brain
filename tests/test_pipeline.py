@@ -194,3 +194,25 @@ def test_turno_repassa_memoria_paciente_pro_base_final():
     )
 
     assert r.base_final.get("memoria_paciente") == memoria
+
+
+def test_turno_reask_engine_sobrepoe_mensagem_do_agente_quando_sv_bloqueia():
+    # State Validator REASK (data no passado) -> Reask Engine assume a mensagem final, igual ao
+    # 'SV Router' + fallback `mensagem_final || texto_ia` do node de envio real (ver docstring).
+    ia_output = IAOutputClassificador(intencao_rapida="triagem", rota_agente=0)
+    resposta_agente = RespostaAgente(
+        mensagem="Beleza, marcando pra 01/01/2020!", estado=EstadoConsulta(i="coleta", dt="2020-01-01"),
+    )
+    client = _mock_client(ia_output, resposta_agente)
+
+    r = processar_turno(
+        busca_paciente_id1=None, busca_paciente_telefone=None, extrair_medico_timeline=None,
+        sessao=None, whatsapp_info=WA_INFO, mensagem_agrupada="quero pra 01/01/2020",
+        historico=[], openai_client=client,
+    )
+
+    assert r.sv_result == "REASK"
+    assert r.sv_reason == "data_no_passado"
+    assert "Não consigo agendar em datas passadas" in r.mensagem
+    assert "01/01/2020" in r.mensagem
+    assert "marcando" not in r.mensagem

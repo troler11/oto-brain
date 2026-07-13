@@ -34,6 +34,13 @@ mas só LEITURA (busca consultas ativas via o mesmo sub-workflow de `cancelar_co
 listagem — nunca cancela nada). Roda ANTES do corte de rota==5 (espelha o grafo real: `É
 Remarcação?` é avaliado logo após Extrair Rota, independente de rota_agente). `agente_usado=None`
 nesse caso também.
+
+Reask Engine (13/07/2026, achado como código órfão numa auditoria — `app.reask_engine` já
+existia, portado mas nunca chamado): ligado no fim do turno normal (fora dos 3 atalhos acima).
+No n8n real, 'SV Router' manda pro Reask Engine sempre que `sv_result != 'ALLOW'` (cobre REASK E
+BLOCK, mesmo caminho) — a `mensagem_final` dele SOBREPÕE a do agente. Persistência em
+`chat_messages` ("Salvar Reask Memory") fica de fora — nenhum módulo Python grava histórico de
+conversa hoje, isso é só do n8n enquanto `/route` for shadow.
 """
 
 from __future__ import annotations
@@ -44,7 +51,7 @@ import httpx
 import psycopg
 from openai import OpenAI
 
-from app import confirmar_presenca_fluxo, dispatcher, eif1, er, injetar_contexto_agendamento, montar_contexto, preparar_input_agenda, processar_remarcacao, state_validator
+from app import confirmar_presenca_fluxo, dispatcher, eif1, er, injetar_contexto_agendamento, montar_contexto, preparar_input_agenda, processar_remarcacao, reask_engine, state_validator
 from app.agentes import classificar_intencao, empacotar_para_eif1
 
 
@@ -154,8 +161,19 @@ def processar_turno(
     inp = state_validator.normalizar_ds(resultado_eif1.to_dict())
     sv = state_validator.validar_estado(inp, base=base_mc, er_output=base_agente)
 
+    # WIRING_REASK_ENGINE (13/07/2026): no n8n real, 'SV Router' (IF em sv_result=='ALLOW') manda
+    # pro Reask Engine em QUALQUER resultado != ALLOW (REASK e BLOCK, mesmo caminho) — a mensagem
+    # dele SOBREPÕE a do agente (`mensagem_final || texto_ia` no node de envio real). `sv.inp` já
+    # carrega os campos de coleta que app.reask_engine.processar() precisa; só falta `sv_reason`,
+    # que vive em `sv.sv_reason` (fora do dict `inp`). Persistência em `chat_messages` ("Salvar
+    # Reask Memory") fica de fora — nenhum módulo Python grava histórico de conversa hoje, `/route`
+    # é shadow e n8n é quem possui essa persistência de verdade.
+    mensagem = resultado_eif1.texto_ia
+    if sv.sv_result != "ALLOW":
+        mensagem = reask_engine.processar({**sv.inp, "sv_reason": sv.sv_reason})["mensagem_final"]
+
     return ResultadoTurno(
-        mensagem=resultado_eif1.texto_ia,
+        mensagem=mensagem,
         intencao=resultado_eif1.intencao,
         sv_result=sv.sv_result,
         sv_reason=sv.sv_reason,
