@@ -184,3 +184,57 @@ def test_insere_agendamento_para_terceiro_true_quando_terceiro_vazio():
     )
     params = cur.execute.call_args.args[1]
     assert params["para_terceiro"] is True
+
+
+# ---------- gate notEmpty (port do node If real — no-op silencioso) ----------
+
+def test_campo_obrigatorio_vazio_nao_chama_nada():
+    conn, cur = _mock_conn()
+
+    def handler(request):
+        raise AssertionError(f"não deveria chamar TiSaude com gate reprovado: {request.url.path}")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    r = criar_consulta_completo(
+        nome_paciente="Lucas", cpf_paciente="11144477735", nascimento_paciente="17/12/2018",
+        telefone_paciente="11999999999", email_paciente="", unidade="", convenio="Particular",
+        nome_medico_escolhido="Giseli", data="2026-07-20", hora="09:00", conn=conn, tisaude_client=client,
+    )
+    assert r == {}
+    cur.execute.assert_not_called()
+
+
+# ---------- fallback telefone_titular || telefone_paciente ----------
+
+def test_telefone_titular_tem_prioridade_sobre_telefone_paciente():
+    import json as _json
+    chamou_com = {}
+    call_count = {"n": 0}
+
+    def handler(request):
+        path = request.url.path
+        if path == "/api/login":
+            return httpx.Response(200, json={"access_token": "tok"})
+        if path == "/api/schedule/doctors":
+            return httpx.Response(200, json={"data": [{"id": 11, "name": "Giseli Rebechi"}]})
+        if path == "/api/patients" and request.method == "GET":
+            call_count["n"] += 1
+            return httpx.Response(200, json={"data": [] if call_count["n"] == 1 else [{"id": 7}]})
+        if path == "/api/patients/create":
+            chamou_com["celular"] = _json.loads(request.content)["cellphone"]
+            return httpx.Response(200, json={"id": 7})
+        if path == "/api/patients/7":
+            return httpx.Response(200, json=PACIENTE_API)
+        if path == "/api/schedule/new":
+            return httpx.Response(200, json={"appointment": {"id": 999, "patient": {"name": "LUCAS BUENO", "cpf": "11144477735", "dateOfBirth": "17/12/2018"}}})
+        raise AssertionError(f"chamada inesperada: {request.method} {path}")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    conn, cur = _mock_conn()
+    criar_consulta_completo(
+        nome_paciente="Lucas", cpf_paciente="11144477735", nascimento_paciente="17/12/2018",
+        telefone_paciente="5511988887777@s.whatsapp.net", telefone_titular="5511999999999@s.whatsapp.net",
+        email_paciente="", unidade="Vila Olímpia", convenio="Particular",
+        nome_medico_escolhido="Giseli", data="2026-07-20", hora="09:00", conn=conn, tisaude_client=client,
+    )
+    assert chamou_com["celular"] == "11999999999"

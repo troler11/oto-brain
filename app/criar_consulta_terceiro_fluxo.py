@@ -28,6 +28,15 @@ original. Este port reusa o mesmo padrão robusto já testado em `app.criar_cons
 ⚠️ ESCOPO (13/07/2026, decisão Lucas): só CÓDIGO — MUTA de verdade. NÃO ligado a nenhum
 dispatcher/agente/tool ainda. Trava até cutover (Fase 2), mesmo critério dos outros 3 fluxos de
 mutação (confirmar_presenca_fluxo/cancelar_consulta_fluxo/criar_consulta_fluxo).
+
+⚠️ Achados de revisão de fidelidade (13/07/2026, segunda auditoria via `get_workflow_details`,
+sem ligar nada): (1) mesmo node `If` de `notEmpty` do `criar_consulta_fluxo` (ver docstring lá),
+10 campos aqui — portado como guard, retorna `{}` (no-op silencioso, fiel ao branch falso sem
+conexão). (2) `Extrair IDs Dinamicos3` calcula `telefoneTitular = dados.telefone_titular ||
+dados.telefone_paciente || ''` — o fallback secundário pra `telefone_paciente` não existia neste
+port (este tool só recebia `telefone_titular`, sem 2ª opção). Adicionado parâmetro opcional
+`telefone_paciente` só pra esse fallback (baixo risco na prática — este tool é orientado a
+titular, `telefone_titular` deveria sempre vir preenchido — mas fiel ao JS original).
 """
 
 from __future__ import annotations
@@ -40,6 +49,12 @@ from app.criar_consulta_fluxo import (
     _extrair_celular_criar_paciente,
     _normalizar_nascimento_pg,
     _telefone_com_55,
+)
+
+
+_CAMPOS_OBRIGATORIOS = (
+    "unidade", "nome_medico_escolhido", "data", "hora", "nome_dependente", "cpf_dependente",
+    "nascimento_dependente", "nome_titular", "cpf_titular", "convenio",
 )
 
 
@@ -58,13 +73,25 @@ def criar_consulta_terceiro_completo(
     nome_medico_escolhido: str,
     data: str,
     hora: str,
+    telefone_paciente: str | None = None,
     conn: psycopg.Connection,
     tisaude_client: httpx.Client | None = None,
 ) -> dict:
     """Orquestra 'Criar Consulta Terceiro' inteiro: resolve médico, busca/cria o PACIENTE
-    DEPENDENTE na TiSaude (usando telefone do TITULAR pro celular, igual ao node original), cria
-    a consulta, grava em `agendamentos` com `contato_id` resolvido pelo telefone do titular
-    (`Cria fila` usa `query.telefone_titular`, não o telefone do dependente)."""
+    DEPENDENTE na TiSaude (usando telefone do TITULAR pro celular, com fallback pra
+    `telefone_paciente` — igual ao node original), cria a consulta, grava em `agendamentos` com
+    `contato_id` resolvido pelo telefone do titular (`Cria fila` usa `query.telefone_titular`,
+    não o telefone do dependente). Retorna `{}` se o gate `notEmpty` do node `If` real reprovar
+    (no-op silencioso)."""
+    campos = {
+        "unidade": unidade, "nome_medico_escolhido": nome_medico_escolhido, "data": data,
+        "hora": hora, "nome_dependente": nome_dependente, "cpf_dependente": cpf_dependente,
+        "nascimento_dependente": nascimento_dependente, "nome_titular": nome_titular,
+        "cpf_titular": cpf_titular, "convenio": convenio,
+    }
+    if not all(campos[c] for c in _CAMPOS_OBRIGATORIOS):
+        return {}
+
     token = tisaude.login(client=tisaude_client)
 
     medicos = tisaude.medicos_por_unidade(unidade, token, client=tisaude_client)
@@ -79,7 +106,7 @@ def criar_consulta_terceiro_completo(
     if not pacientes_existentes:
         tisaude.criar_paciente(
             nome=nome_dependente, cpf=cpf_dependente,
-            celular=_extrair_celular_criar_paciente(telefone_titular),
+            celular=_extrair_celular_criar_paciente(telefone_titular or telefone_paciente),
             nascimento_iso=nascimento_dependente, email=email_paciente or "",
             token=token, client=tisaude_client,
         )

@@ -24,6 +24,17 @@ perguntar — portado literal.
 real na TiSaude + grava em `agendamentos` no Postgres). NÃO ligado a nenhum dispatcher/agente/
 tool ainda. Só entra em uso depois do cutover (Fase 2) — mesma trava do cancelar_consulta_fluxo/
 confirmar_presenca_fluxo.
+
+⚠️ Achados de revisão de fidelidade (13/07/2026, segunda auditoria via `get_workflow_details`,
+sem ligar nada): (1) o node `If` real valida `notEmpty` em 8 campos antes de deixar o fluxo
+prosseguir — a branch falsa não tem conexão nenhuma, ou seja, é um no-op silencioso (nenhuma
+chamada TiSaude/Postgres, nenhum erro). Portado como guard logo no início de
+`criar_consulta_completo`, retornando `{}`. (2) o node `Extrair IDs Dinamicos3` calcula
+`telefoneTitular = dados.telefone_titular || dados.telefone_paciente || ''` e é ESSE valor que
+`Criar Paciente` usa pro `cellphone` — não `telefone_paciente` direto. Este tool também é
+chamado com `terceiro` preenchido (agendar dependente sem passar pelo tool dedicado), então o
+parâmetro `telefone_titular` (opcional) foi adicionado com prioridade sobre `telefone_paciente`,
+igual ao JS.
 """
 
 from __future__ import annotations
@@ -63,6 +74,12 @@ def _telefone_com_55(telefone: str) -> str:
     return t if t.startswith("55") else "55" + t
 
 
+_CAMPOS_OBRIGATORIOS = (
+    "nome_paciente", "hora", "nascimento_paciente", "unidade", "data", "convenio",
+    "nome_medico_escolhido", "cpf_paciente",
+)
+
+
 def criar_consulta_completo(
     *,
     nome_paciente: str,
@@ -76,14 +93,24 @@ def criar_consulta_completo(
     data: str,
     hora: str,
     terceiro: str | None = None,
+    telefone_titular: str | None = None,
     conn: psycopg.Connection,
     tisaude_client: httpx.Client | None = None,
 ) -> dict:
     """Orquestra 'Criar Consulta e Paciente' inteiro: resolve médico -> busca/cria paciente na
     TiSaude -> cria a consulta -> grava linha em `agendamentos` (Postgres, tabela de fila/
-    histórico — não é `agenda_cache`). Retorna `{"resultado": "..."}` (sucesso) ou
+    histórico — não é `agenda_cache`). Retorna `{"resultado": "..."}` (sucesso),
     `{"erro": "MEDICO_NAO_ENCONTRADO", "resultado": "..."}` (mesmo texto de erro do `throw` do
-    node original, sem agendar)."""
+    node original, sem agendar) ou `{}` (gate `notEmpty` do node `If` real reprovou — no-op
+    silencioso, port fiel: nenhuma chamada TiSaude/Postgres acontece)."""
+    campos = {
+        "nome_paciente": nome_paciente, "hora": hora, "nascimento_paciente": nascimento_paciente,
+        "unidade": unidade, "data": data, "convenio": convenio,
+        "nome_medico_escolhido": nome_medico_escolhido, "cpf_paciente": cpf_paciente,
+    }
+    if not all(campos[c] for c in _CAMPOS_OBRIGATORIOS):
+        return {}
+
     token = tisaude.login(client=tisaude_client)
 
     medicos = tisaude.medicos_por_unidade(unidade, token, client=tisaude_client)
@@ -98,7 +125,7 @@ def criar_consulta_completo(
     if not pacientes_existentes:
         tisaude.criar_paciente(
             nome=nome_paciente, cpf=cpf_paciente,
-            celular=_extrair_celular_criar_paciente(telefone_paciente),
+            celular=_extrair_celular_criar_paciente(telefone_titular or telefone_paciente),
             nascimento_iso=nascimento_paciente, email=email_paciente or "",
             token=token, client=tisaude_client,
         )

@@ -120,3 +120,48 @@ def test_insere_agendamento_com_contato_id_do_titular_e_para_terceiro_true():
     assert params["cpf_paciente"] == "22233344456"
     assert params["nascimento"] == "2018-12-17"
     assert params["id_itsaude"] == 777
+
+
+# ---------- gate notEmpty (port do node If real — no-op silencioso) ----------
+
+def test_campo_obrigatorio_vazio_nao_chama_nada():
+    conn, cur = _mock_conn()
+
+    def handler(request):
+        raise AssertionError(f"não deveria chamar TiSaude com gate reprovado: {request.url.path}")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    r = _chamar(conn, client, unidade="")
+    assert r == {}
+    cur.execute.assert_not_called()
+
+
+# ---------- fallback telefone_titular || telefone_paciente ----------
+
+def test_telefone_paciente_e_fallback_quando_titular_vazio():
+    import json as _json
+    chamou_com = {}
+    call_count = {"n": 0}
+
+    def handler(request):
+        path = request.url.path
+        if path == "/api/login":
+            return httpx.Response(200, json={"access_token": "tok"})
+        if path == "/api/schedule/doctors":
+            return httpx.Response(200, json={"data": [{"id": 11, "name": "Giseli Rebechi"}]})
+        if path == "/api/patients" and request.method == "GET":
+            call_count["n"] += 1
+            return httpx.Response(200, json={"data": [] if call_count["n"] == 1 else [{"id": 9}]})
+        if path == "/api/patients/create":
+            chamou_com["celular"] = _json.loads(request.content)["cellphone"]
+            return httpx.Response(200, json={"id": 9})
+        if path == "/api/patients/9":
+            return httpx.Response(200, json=PACIENTE_API)
+        if path == "/api/schedule/new":
+            return httpx.Response(200, json={"appointment": {"id": 777, "patient": {"name": "MIGUEL BUENO", "cpf": "22233344456", "dateOfBirth": "17/12/2018"}}})
+        raise AssertionError(f"chamada inesperada: {request.method} {path}")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    conn, cur = _mock_conn()
+    _chamar(conn, client, telefone_titular="", telefone_paciente="5511988887777@s.whatsapp.net")
+    assert chamou_com["celular"] == "11988887777"
