@@ -33,7 +33,9 @@ _RE_CORRECAO = re.compile(
 # Presença confirmada ✅ Até lá!" caíam em desistência só por serem a última msg da sessão.
 _RE_DESFECHO_SUCESSO = re.compile(
     r"presença confirmada|consulta (agendada|confirmada|cancelada)|"
-    r"cancelad[ao] com sucesso|agendad[ao] com sucesso|prontinho.*confirmad",
+    r"cancelad[ao] com sucesso|agendad[ao] com sucesso|prontinho.*confirmad|"
+    r"já está confirmada|não encontrei (consultas|nenhuma consulta)|"
+    r"até logo|até mais|tenha um [oó]timo dia",
     re.IGNORECASE,
 )
 
