@@ -3,10 +3,34 @@ Port fiel do nó 'Verificar Cadastro3' — DEPLOY/_proposed_Verificar_Cadastro3.
 snapshot 12/07/2026). Fase 1 do plano de migração (ver
 C:\\Users\\lucas\\.claude\\plans\\unified-coalescing-puppy.md).
 
-Roda no fluxo "Ver" (menu de confirmação de presença), não no fluxo principal do Extrair Rota.
-Recebe a lista de pacientes já buscados (fonte preferencial = fichas completas do "BUSCAR
-PACIENTE ID1"; fallback = busca por telefone) e devolve UM ITEM POR PACIENTE (n8n `.map()` —
-por isso `processar()` retorna `list[dict]`, não um dict único como os outros ports desta leva).
+⚠️ CORREÇÃO (13/07/2026, `get_workflow_details` completo no grafo real — a premissa abaixo, de
+uma fase anterior desta migração, estava ERRADA): NÃO roda condicionalmente num fluxo "Ver"
+separado, nem é gateado por `intencao_rapida=="ver"`. Roda **incondicionalmente em toda
+mensagem recebida** — é a fase de identificação de paciente (`Login TiSaude (Inicial)` → `Buscar
+Paciente por Telefone` → `Achou Paciente?` → `BUSCAR PACIENTE ID1`/fallback → **este node**) que
+antecede `Carregar Sessao`/`Montar Contexto`/`AI Agent`/`Extrair Rota` no grafo real — ou seja, é
+estrutural, não um atalho. Recebe a lista de pacientes já buscados (fonte preferencial = fichas
+completas do "BUSCAR PACIENTE ID1"; fallback = busca por telefone) e devolve UM ITEM POR PACIENTE
+(n8n `.map()` — por isso `processar()` retorna `list[dict]`, não um dict único como os outros
+ports desta leva).
+
+⚠️ NÃO LIGADO DE PROPÓSITO (mesma investigação, decisão explícita — não é gap/pendência): o dado
+diferencial que este node produz (`index_paciente`/`total_pacientes`, lista numerada de
+pacientes) **não é lido por nenhum consumidor no grafo real** — nem pelo `AI Agent`, nem por
+`Agente Triagem/Ver`, nem por `Montar Contexto`. É vestigial mesmo no n8n original. Ligar isso no
+port Python exigiria portar toda a cadeia de identificação de paciente acima (login TiSaude +
+busca por telefone + busca por ID) só pra alimentar um resultado que ninguém consome — sem valor,
+não é prioridade. Se o pipeline Python já resolve identificação de paciente de outra forma (via
+`busca_paciente_id1`/`busca_paciente_telefone` passados prontos pro `app.pipeline.processar_turno`
+por quem chama), esse é o motivo: a etapa foi resolvida fora deste módulo.
+
+⚠️ BUG achado em produção (n8n real, não é do port): o JS original referencia
+`$items('Carregar Cache1')[0]?.json`, mas **não existe nenhum node `Carregar Cache1`** no grafo
+— a chamada está dentro de um try/catch vazio, falha silenciosa, `cache_ativo`/`unidade_cache`/
+`ultimo_dia_exibido` sempre saem `false`/`''`/`null` em produção. Reportado a Lucas separadamente
+(fora do escopo desta migração corrigir workflow ativo sem aprovação explícita — ver
+CLAUDE.local.md). Este port replica o parâmetro `cache_row` como recebido (fiel ao código, que já
+está sempre vazio na prática).
 
 Tem um bloco de cache (`cache_ativo`/`unidade_cache`/`ultimo_dia_exibido`/`ultimo_dia_texto`)
 parecido com o de `app.montar_contexto`, mas NÃO byte-idêntico — `ultimo_dia_texto` aqui mantém
