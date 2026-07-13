@@ -4,6 +4,7 @@ mockado. Cobre também o round-trip com app.eif1.processar(), que é o ponto int
 (RespostaAgente empacotada deve continuar sendo interpretada pelo EIF1 sem mudança nenhuma lá).
 """
 
+import json
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
@@ -52,6 +53,102 @@ def test_chamar_agente_usa_model_customizado():
     client = _mock_client(esperado)
     chamar_agente("SYSTEM", [], client=client, model="gpt-4o-mini")
     assert client.beta.chat.completions.parse.call_args.kwargs["model"] == "gpt-4o-mini"
+
+
+# ---------- chamar_agente com tool-calling (Fase 3, 13/07/2026) ----------
+
+def _tool_call(id_, name, arguments: dict):
+    tc = MagicMock()
+    tc.id = id_
+    tc.function.name = name
+    tc.function.arguments = json.dumps(arguments)
+    return tc
+
+
+def _completion_com_tool_calls(tool_calls):
+    msg = MagicMock()
+    msg.tool_calls = tool_calls
+    msg.content = None
+    completion = MagicMock()
+    completion.choices = [MagicMock(message=msg)]
+    return completion
+
+
+def _completion_final(resposta):
+    msg = MagicMock()
+    msg.tool_calls = None
+    msg.parsed = resposta
+    completion = MagicMock()
+    completion.choices = [MagicMock(message=msg)]
+    return completion
+
+
+TOOLS_TESTE = [{"type": "function", "function": {"name": "navegar_agenda", "description": "...", "parameters": {}}}]
+
+
+def test_chamar_agente_sem_tools_ignora_tool_calls_do_mock():
+    # sem `tools`, o loop nem olha pra `message.tool_calls` (MagicMock cria o atributo sozinho,
+    # truthy por padrão) — comportamento idêntico a antes de existir tool-calling.
+    esperado = RespostaAgente(mensagem="ok", estado=EstadoConsulta(i="triagem"))
+    client = _mock_client(esperado)
+    r = chamar_agente("SYSTEM", [], client=client)
+    assert r is esperado
+    assert client.beta.chat.completions.parse.call_count == 1
+
+
+def test_chamar_agente_executa_tool_call_e_continua_ate_resposta_final():
+    esperado = RespostaAgente(mensagem="Horário 09:00 disponível!", estado=EstadoConsulta(i="agenda"))
+    tc = _tool_call("call_1", "navegar_agenda", {"acao": "ver", "telefone_paciente": "5511999999999", "unidade": "Vila Olímpia"})
+    client = MagicMock()
+    client.beta.chat.completions.parse.side_effect = [
+        _completion_com_tool_calls([tc]),
+        _completion_final(esperado),
+    ]
+    executor = MagicMock(return_value={"status": "OK", "dia": {"data": "2026-07-20"}})
+
+    r = chamar_agente(
+        "SYSTEM", [{"role": "user", "content": "tem horário?"}], client=client,
+        tools=TOOLS_TESTE, executores={"navegar_agenda": executor},
+    )
+
+    assert r is esperado
+    assert client.beta.chat.completions.parse.call_count == 2
+    executor.assert_called_once_with({"acao": "ver", "telefone_paciente": "5511999999999", "unidade": "Vila Olímpia"})
+
+    segunda_chamada_msgs = client.beta.chat.completions.parse.call_args_list[1].kwargs["messages"]
+    msg_assistant = segunda_chamada_msgs[-2]
+    msg_tool = segunda_chamada_msgs[-1]
+    assert msg_assistant["role"] == "assistant"
+    assert msg_assistant["tool_calls"][0]["id"] == "call_1"
+    assert msg_assistant["tool_calls"][0]["function"]["name"] == "navegar_agenda"
+    assert msg_tool == {"role": "tool", "tool_call_id": "call_1", "content": json.dumps({"status": "OK", "dia": {"data": "2026-07-20"}}, ensure_ascii=False)}
+
+
+def test_chamar_agente_tool_call_sem_executor_devolve_erro_pro_modelo():
+    esperado = RespostaAgente(mensagem="ok", estado=EstadoConsulta(i="triagem"))
+    tc = _tool_call("call_1", "tool_desconhecida", {})
+    client = MagicMock()
+    client.beta.chat.completions.parse.side_effect = [
+        _completion_com_tool_calls([tc]),
+        _completion_final(esperado),
+    ]
+
+    chamar_agente("SYSTEM", [], client=client, tools=TOOLS_TESTE, executores={})
+
+    msg_tool = client.beta.chat.completions.parse.call_args_list[1].kwargs["messages"][-1]
+    assert json.loads(msg_tool["content"]) == {"erro": "tool 'tool_desconhecida' sem executor"}
+
+
+def test_chamar_agente_excede_max_tool_turns_estoura_erro():
+    tc = _tool_call("call_1", "navegar_agenda", {})
+    client = MagicMock()
+    client.beta.chat.completions.parse.side_effect = [_completion_com_tool_calls([tc]) for _ in range(10)]
+
+    try:
+        chamar_agente("SYSTEM", [], client=client, tools=TOOLS_TESTE, executores={"navegar_agenda": lambda a: {}})
+        assert False, "deveria ter estourado RuntimeError"
+    except RuntimeError as e:
+        assert "excedeu" in str(e)
 
 
 # ---------- empacotar_para_eif1 + round-trip com app.eif1.processar ----------

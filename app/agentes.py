@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Callable
 
 from openai import OpenAI
 from pydantic import BaseModel, Field
@@ -60,24 +61,60 @@ class RespostaAgente(BaseModel):
     estado: EstadoConsulta
 
 
+MAX_TOOL_TURNS = 6
+
+
 def chamar_agente(
     system_prompt: str,
     mensagens: list[dict],
     *,
     client: OpenAI | None = None,
     model: str = MODEL_PADRAO,
+    tools: list[dict] | None = None,
+    executores: dict[str, Callable[[dict], dict]] | None = None,
 ) -> RespostaAgente:
     """Chama o agente com structured output. `mensagens` = histórico da conversa
     (`[{"role": "user"|"assistant", "content": ...}, ...]`, sem o system prompt, que vai
     separado). `client` é injetável pra teste (mock) — sem isso, cria um `OpenAI()` de
-    verdade usando `OPENAI_API_KEY` do .env."""
+    verdade usando `OPENAI_API_KEY` do .env.
+
+    `tools`/`executores` (Fase 3, 13/07/2026 — loop de function-calling real, réplica do que os
+    nós LangChain do n8n faziam com as tool sub-workflows): `tools` é o schema OpenAI
+    (`[{"type": "function", "function": {"name", "description", "parameters"}}, ...]`),
+    `executores` mapeia `nome da tool -> callable(args: dict) -> dict` (o resultado, serializável
+    em JSON, que volta pro modelo como mensagem `role="tool"`). Sem `tools`, comportamento
+    idêntico a antes (1 chamada, resposta final direto) — retrocompatível com todo o resto do
+    port que já chama `chamar_agente` sem essa opção."""
     client = client or OpenAI(api_key=OPENAI_API_KEY)
-    completion = client.beta.chat.completions.parse(
-        model=model,
-        messages=[{"role": "system", "content": system_prompt}, *mensagens],
-        response_format=RespostaAgente,
-    )
-    return completion.choices[0].message.parsed
+    msgs = [{"role": "system", "content": system_prompt}, *mensagens]
+
+    for _ in range(MAX_TOOL_TURNS):
+        completion = client.beta.chat.completions.parse(
+            model=model, messages=msgs, response_format=RespostaAgente, tools=tools,
+        )
+        msg = completion.choices[0].message
+        # `tools` só é checado quando o CHAMADOR passou tools de verdade — sem isso, um
+        # MagicMock de teste tem `.tool_calls` auto-criado (truthy) mesmo sem ninguém setar
+        # nada, o que quebraria todo o resto do port que já mocka `chamar_agente` sem tools.
+        tool_calls = getattr(msg, "tool_calls", None) if tools else None
+        if not tool_calls:
+            return msg.parsed
+
+        msgs.append({
+            "role": "assistant",
+            "content": msg.content,
+            "tool_calls": [
+                {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in tool_calls
+            ],
+        })
+        for tc in tool_calls:
+            executor = (executores or {}).get(tc.function.name)
+            args = json.loads(tc.function.arguments or "{}")
+            resultado = executor(args) if executor else {"erro": f"tool '{tc.function.name}' sem executor"}
+            msgs.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(resultado, ensure_ascii=False)})
+
+    raise RuntimeError(f"chamar_agente: excedeu {MAX_TOOL_TURNS} turnos de tool-calling sem resposta final")
 
 
 def empacotar_para_eif1(resposta: RespostaAgente) -> str:
