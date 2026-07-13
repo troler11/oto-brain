@@ -8,6 +8,8 @@ específico; 1 só quando rota_agente==5, que retorna cedo sem chamar agente).
 
 from unittest.mock import MagicMock
 
+import httpx
+
 from app.agentes import EstadoConsulta, IAOutputClassificador, RespostaAgente
 from app.pipeline import processar_turno
 
@@ -80,6 +82,58 @@ def test_turno_rota_5_confirmar_presenca_retorna_cedo_sem_chamar_agente():
 
     assert r.rota_agente == 5
     assert r.agente_usado is None
+    assert client.beta.chat.completions.parse.call_count == 1
+
+
+def test_turno_remarcacao_sem_cpf_retorna_cedo_mensagem_vazia():
+    # sem busca_paciente -> cpf ausente -> buscar_e_processar retorna None sem chamar TiSaude
+    # (mesmo padrão de rota==5): agente nunca é chamado, mensagem vazia (sem opinião shadow).
+    ia_output = IAOutputClassificador(intencao_rapida="triagem", rota_agente=0)
+    client = _mock_client(ia_output)  # só 1 resultado — se dispatcher for chamado, StopIteration
+
+    r = processar_turno(
+        busca_paciente_id1=None, busca_paciente_telefone=None, extrair_medico_timeline=None,
+        sessao=None, whatsapp_info=WA_INFO, mensagem_agrupada="quero remarcar minha consulta",
+        historico=[], openai_client=client,
+    )
+
+    assert r.agente_usado is None
+    assert r.mensagem == ""
+    assert client.beta.chat.completions.parse.call_count == 1
+
+
+def test_turno_remarcacao_busca_consulta_real_e_retorna_cedo_sem_chamar_agente():
+    ia_output = IAOutputClassificador(intencao_rapida="triagem", rota_agente=0)
+    client = _mock_client(ia_output)  # só 1 resultado — se dispatcher for chamado, StopIteration
+
+    def handler(request):
+        path = request.url.path
+        if path == "/api/login":
+            return httpx.Response(200, json={"access_token": "tok"})
+        if path == "/api/patients":
+            return httpx.Response(200, json={"data": [{"id": 55, "name": "Lucas Bueno", "cpf": "11111111111"}]})
+        if path == "/api/patients/55/timeline":
+            return httpx.Response(200, json={"data": [
+                {"date": "2026-07-20", "data": [
+                    {"type": "appointment", "id": 999, "date": "2026-07-20", "hour": "10:00",
+                     "calendar": {"name": "Giseli Rebechi"}, "status": {"name": "Pendente"},
+                     "local": {"name": "Vila Olímpia"}, "healthInsurance": {"name": "Itaú"}},
+                ]},
+            ]})
+        raise AssertionError(f"chamada inesperada (mutação não deveria acontecer aqui): {path}")
+
+    tisaude_client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    r = processar_turno(
+        busca_paciente_id1=[{"id": "55", "name": "Lucas Bueno", "cpf": "11111111111"}],
+        busca_paciente_telefone=None, extrair_medico_timeline=None,
+        sessao=None, whatsapp_info=WA_INFO, mensagem_agrupada="quero remarcar minha consulta",
+        historico=[], openai_client=client, tisaude_client=tisaude_client,
+    )
+
+    assert r.agente_usado is None
+    assert "20/07/2026 às 10:00 com Dr(a). Giseli Rebechi" in r.mensagem
+    assert "$$$" not in r.mensagem  # eif1 já stripou o bloco de estado, igual qualquer agente
     assert client.beta.chat.completions.parse.call_count == 1
 
 

@@ -5,24 +5,46 @@ C:\\Users\\lucas\\.claude\\plans\\unified-coalescing-puppy.md).
 
 ⚠️ HERANÇA DO JS FONTE (comentário do autor original, preservado aqui pra não se perder na
 migração): os nomes de campo da consulta (dt/data, hr/hora, md/medico, unid/unidade,
-conv/convenio, id/id_agendamento) são um PALPITE EDUCADO baseado no que
-`Agente_Cancelamento.txt` referencia — não confirmado contra o shape real da resposta do
-sub-workflow (dados de execução ficam redigidos na API do n8n). O `pick()` tolerante a
-variações de nome existe por causa dessa incerteza. Este port é fiel ao JS como está — a
-confirmação do shape real é trabalho pendente de quem ativar este nó em produção, não algo
-que dá pra resolver só portando o código.
+conv/convenio, id/id_agendamento) eram um PALPITE EDUCADO — CONFIRMADO 13/07/2026 via
+auditoria completa do grafo n8n real: `Buscar Consulta Atual (Remarcar)` não é um sub-workflow
+próprio, é o MESMO sub-workflow `Ferramenta - Cancelar Consulta` (`i4m4RaNI7E0RkgXp`) chamado em
+modo listagem (`id_agendamento=""`) — já portado em `app.cancelar_consulta_fluxo` (ver
+`buscar_e_processar()` abaixo). Shape real confirmado:
+`{id, data, dataBR, hora, medico, status, unidade, convenio}` — bate com o `pick()` tolerante
+que já existia aqui (mantido mesmo assim, não custa nada e cobre variação de nome de outros
+pontos do grafo).
 
 Dispatcher determinístico do Agente Remarcação. Roda logo após a busca de consultas ativas
 (modo listagem, não cancela nada). Três casos: 0 consultas (cai pro fluxo de agendamento
 novo) / 1 consulta (auto-seleciona) / 2+ consultas (pergunta qual, ou interpreta a escolha
 se já estava em `sessao_intencao='remarcando_escolher'`).
+
+Wiring (13/07/2026, ligado em `app.pipeline.processar_turno`, mesmo padrão do rota_agente==5):
+`É Remarcação?` no n8n real é um IF avaliado logo após 'Extrair Rota', em paralelo ao roteador
+de rota_agente — dispara em `intencao_rapida in ('remarcando', 'remarcando_escolher')`,
+independente de rota_agente, e sempre desvia dos Agentes LLM nesse turno (confirmado via
+`get_workflow_details`: `Buscar Consulta Atual (Remarcar)` → `Processar Remarcação` →
+`Extrair Intencao Final1` → `Normalizar DS` → `State Validator`, sem nenhum Agente no meio).
+Escopo (mesma decisão de Lucas pro resto da migração): só o modo LISTAGEM do sub-workflow de
+cancelamento é chamado aqui (`cancelar_consulta_completo(id_agendamento=None)`, 100% leitura —
+nunca alcança `tisaude.cancelar_consulta`). O cancelamento real da consulta antiga
+(`Cancelar Antiga (Remarcacao)`, mesmo endpoint `STATUS_CANCELAR=-2`) só acontece turnos depois,
+já como mutação — fora de escopo, mesma trava dos outros fluxos de mutação (ver
+`app.cancelar_consulta_fluxo`).
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import re
 import unicodedata
+
+import httpx
+
+from app import cancelar_consulta_fluxo
+
+logger = logging.getLogger("oto-brain.remarcacao")
 
 _UNIDADE_PICK_NAMES = ("unid", "unidade", "local")
 
@@ -152,3 +174,21 @@ def processar(extrair_rota: dict, mensagem_agrupada: str, sub_workflow_items: li
 
     # CASO 1: consulta única
     return _processar_escolha(base, texto_usuario, consultas[0])
+
+
+def buscar_e_processar(base: dict, mensagem_agrupada: str, *, tisaude_client: httpx.Client | None = None) -> dict | None:
+    """IO: busca as consultas ativas do paciente (mesmo sub-workflow TiSaude que
+    `cancelar_consulta` usa, em modo listagem — `id_agendamento` nunca é passado, então NUNCA
+    cancela nada de verdade) e delega a decisão pro dispatcher puro `processar()` acima.
+    Retorna `None` em caso de falha de IO ou CPF ausente — mesmo contrato de
+    `app.confirmar_presenca_fluxo.processar_rota5` (sem opinião shadow nesse turno, cai pro
+    caminho real do n8n)."""
+    cpf = base.get("cpf_dependente") or base.get("cpf")
+    if not cpf:
+        return None
+    try:
+        resultado_busca = cancelar_consulta_fluxo.cancelar_consulta_completo(cpf=cpf, tisaude_client=tisaude_client)
+    except Exception:
+        logger.exception("remarcacao: falha ao buscar consultas ativas na TiSaude (cpf=%s)", cpf)
+        return None
+    return processar(base, mensagem_agrupada, [resultado_busca])

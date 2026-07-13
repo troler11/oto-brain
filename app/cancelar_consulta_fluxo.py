@@ -7,10 +7,13 @@ não reaproveitado de propósito, cada um fiel ao seu node de origem), 'Verifica
 listar vs. executar cancelamento), 'Cancelar Consulta1' (`app.tisaude.cancelar_consulta`, já
 existia) e 'Formatar Retorno Cancelamento2'.
 
-⚠️ ESCOPO (13/07/2026, decisão Lucas): só CÓDIGO — MUTA agendamento real (cancela de verdade na
-TiSaude). NÃO ligado a nenhum dispatcher/agente/tool ainda. Só entra em uso depois do cutover
-(Fase 2, `/route` ainda roda em shadow) — ligar agora significaria cancelar consulta de paciente
-de verdade num turno que nem é a resposta real dada a ele.
+⚠️ ESCOPO (13/07/2026, decisão Lucas): a função inteira MUTA quando chamada com `id_agendamento`
+preenchido (cancela de verdade na TiSaude) — esse caminho NÃO está ligado a nenhum
+dispatcher/agente/tool, só entra em uso depois do cutover (Fase 2, `/route` ainda roda em
+shadow). O caminho SEM `id_agendamento` (modo listagem — só busca e lista consultas ativas,
+nunca alcança `tisaude.cancelar_consulta`) passou a ser chamado a partir de
+`app.processar_remarcacao.buscar_e_processar()` (ligado em `app.pipeline`, mesmo dia) — é 100%
+leitura, mesmo endpoint TiSaude que o resto do fluxo de remarcação usa em shadow.
 """
 
 from __future__ import annotations

@@ -27,6 +27,13 @@ espera — `base['_sub_confirmar']` não setado) continuam sem tratamento aqui (
 separado, `intencao_rapida=="humano"` deveria ter prioridade sobre o corte de rota==5, igual já
 acontece em `app.dispatcher.escolher_agente` — pendente de decisão do Lucas).
 `processar_turno()` retorna cedo com `rota_agente=5` e `agente_usado=None` nesse caso.
+
+`intencao_rapida in ("remarcando", "remarcando_escolher")` (13/07/2026, ver
+`app.processar_remarcacao`) é outro atalho 100% determinístico, também ligado à tool TiSaude real
+mas só LEITURA (busca consultas ativas via o mesmo sub-workflow de `cancelar_consulta`, em modo
+listagem — nunca cancela nada). Roda ANTES do corte de rota==5 (espelha o grafo real: `É
+Remarcação?` é avaliado logo após Extrair Rota, independente de rota_agente). `agente_usado=None`
+nesse caso também.
 """
 
 from __future__ import annotations
@@ -37,7 +44,7 @@ import httpx
 import psycopg
 from openai import OpenAI
 
-from app import confirmar_presenca_fluxo, dispatcher, eif1, er, injetar_contexto_agendamento, montar_contexto, preparar_input_agenda, state_validator
+from app import confirmar_presenca_fluxo, dispatcher, eif1, er, injetar_contexto_agendamento, montar_contexto, preparar_input_agenda, processar_remarcacao, state_validator
 from app.agentes import classificar_intencao, empacotar_para_eif1
 
 
@@ -91,6 +98,28 @@ def processar_turno(
     ).model_dump()
 
     r = er.processar(dict(base_mc), mensagem_agrupada, ia_output, whatsapp_info, has_media)
+
+    # WIRING_REMARCACAO (13/07/2026): 'É Remarcação?' no n8n real é avaliado logo após Extrair
+    # Rota, em paralelo ao roteador de rota_agente — independente de rota_agente, sempre desvia
+    # dos Agentes LLM nesse turno (ver docstring de app.processar_remarcacao). None ->
+    # sem opinião shadow (CPF ausente ou falha de IO), mensagem vazia, mesmo padrão de rota==5.
+    if r.intencao_rapida in ("remarcando", "remarcando_escolher"):
+        resultado_remarc = processar_remarcacao.buscar_e_processar(r.base, mensagem_agrupada, tisaude_client=tisaude_client)
+        if resultado_remarc is None:
+            return ResultadoTurno(
+                mensagem="", intencao=r.intencao_rapida, sv_result="", sv_reason="",
+                rota_agente=r.rota_agente, agente_usado=None,
+                deve_resetar_sessao=r.deve_resetar_sessao, base_final=r.base,
+            )
+        resultado_eif1_remarc = eif1.processar(resultado_remarc["output"], extrair_rota=r.base, carregar_sessao=sessao)
+        inp_remarc = state_validator.normalizar_ds(resultado_eif1_remarc.to_dict())
+        sv_remarc = state_validator.validar_estado(inp_remarc, base=base_mc, er_output=r.base)
+        return ResultadoTurno(
+            mensagem=resultado_eif1_remarc.texto_ia, intencao=resultado_eif1_remarc.intencao,
+            sv_result=sv_remarc.sv_result, sv_reason=sv_remarc.sv_reason,
+            rota_agente=r.rota_agente, agente_usado=None,
+            deve_resetar_sessao=r.deve_resetar_sessao, dados=sv_remarc.inp, base_final=r.base,
+        )
 
     # FIX_ROTA5_PRIORIDADE_HUMANO: rota_agente==5 é reusado tanto pro fluxo real de confirmar
     # presença quanto pra bypass determinístico pra humano (encaixe, lista de espera,

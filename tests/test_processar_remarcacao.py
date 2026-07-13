@@ -9,7 +9,9 @@ variações que o `pick()` tolera.
 
 import json
 
-from app.processar_remarcacao import processar
+import httpx
+
+from app.processar_remarcacao import buscar_e_processar, processar
 
 
 def _base(**overrides):
@@ -139,3 +141,61 @@ def test_shape_wrapped_em_consultas():
 def test_shape_array_direto():
     r = processar(_base(), "remarcar", [[{"dt": "10/07/2026", "hr": "09:00", "md": "Giseli", "id": "1", "unid": "vila"}]])
     assert "10/07/2026" in r["output"]
+
+
+# ---------- buscar_e_processar (integração IO, modo listagem só-leitura) ----------
+
+def _handler(pacientes=None, timeline=None):
+    pacientes = pacientes if pacientes is not None else [{"id": 55, "name": "Lucas"}]
+    timeline = timeline if timeline is not None else [
+        {"date": "2026-07-20", "data": [
+            {"type": "appointment", "id": 999, "date": "2026-07-20", "hour": "10:00",
+             "calendar": {"name": "Giseli Rebechi"}, "status": {"name": "Pendente"},
+             "local": {"name": "Vila Olímpia"}, "healthInsurance": {"name": "Itaú"}},
+        ]},
+    ]
+
+    def handler(request):
+        path = request.url.path
+        if path == "/api/login":
+            return httpx.Response(200, json={"access_token": "tok"})
+        if path == "/api/patients":
+            return httpx.Response(200, json={"data": pacientes})
+        if path == "/api/patients/55/timeline":
+            return httpx.Response(200, json={"data": timeline})
+        raise AssertionError(f"chamada inesperada (mutação não deveria acontecer aqui): {path}")
+
+    return handler
+
+
+def test_buscar_e_processar_uma_consulta_pergunta_periodo():
+    client = httpx.Client(transport=httpx.MockTransport(_handler()))
+    r = buscar_e_processar(_base(cpf="12345678900"), "quero remarcar", tisaude_client=client)
+    assert "20/07/2026 às 10:00 com Dr(a). Giseli Rebechi" in r["output"]
+    d = _bloco(r["output"])
+    assert d["unid"] == "Vila Olímpia"
+    assert d["id_ag_antigo"] == 999  # id vem como int do JSON da TiSaude, preservado sem cast
+
+
+def test_buscar_e_processar_sem_consultas_oferece_agendar_novo():
+    client = httpx.Client(transport=httpx.MockTransport(_handler(timeline=[])))
+    r = buscar_e_processar(_base(cpf="12345678900"), "quero remarcar", tisaude_client=client)
+    assert "Não encontrei nenhuma consulta ativa" in r["output"]
+
+
+def test_buscar_e_processar_cpf_do_dependente_tem_prioridade():
+    client = httpx.Client(transport=httpx.MockTransport(_handler()))
+    r = buscar_e_processar(_base(cpf="00000000000", cpf_dependente="12345678900"), "quero remarcar", tisaude_client=client)
+    assert r is not None  # chegou até aqui sem AssertionError = usou cpf_dependente, não cpf
+
+
+def test_buscar_e_processar_sem_cpf_retorna_none():
+    assert buscar_e_processar(_base(), "quero remarcar", tisaude_client=None) is None
+
+
+def test_buscar_e_processar_falha_de_rede_retorna_none():
+    def handler(request):
+        raise httpx.ConnectError("timeout", request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    assert buscar_e_processar(_base(cpf="12345678900"), "quero remarcar", tisaude_client=client) is None
