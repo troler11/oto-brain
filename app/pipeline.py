@@ -36,11 +36,20 @@ Remarcação?` é avaliado logo após Extrair Rota, independente de rota_agente)
 nesse caso também.
 
 Reask Engine (13/07/2026, achado como código órfão numa auditoria — `app.reask_engine` já
-existia, portado mas nunca chamado): ligado no fim do turno normal (fora dos 3 atalhos acima).
+existia, portado mas nunca chamado): ligado no fim do turno normal (fora dos atalhos acima).
 No n8n real, 'SV Router' manda pro Reask Engine sempre que `sv_result != 'ALLOW'` (cobre REASK E
 BLOCK, mesmo caminho) — a `mensagem_final` dele SOBREPÕE a do agente. Persistência em
 `chat_messages` ("Salvar Reask Memory") fica de fora — nenhum módulo Python grava histórico de
 conversa hoje, isso é só do n8n enquanto `/route` for shadow.
+
+Navegação/Troca Direta (13/07/2026, ver `app.navegacao_direta_fluxo`) é outro atalho 100%
+determinístico, checa `eh_navegacao`/`eh_troca_data` logo após o corte de rota==5. Precisa de
+`conn` (Postgres) — sem `conn`, comportamento idêntico a antes (pula o atalho, vai direto pro
+despacho normal). Diferente dos outros atalhos: TEM fallback pro agente completo quando o cache
+está vazio/esgotado (`None` do módulo = cai pro despacho normal), fiel ao node real
+('Precisa Buscar?' -> 'Roteador'). ⚠️ Na prática, só o ramo TROCA dispara hoje — o ramo
+NAVEGAÇÃO depende de `eh_navegacao` sobreviver em `r.base`, o que `app.er` ainda não faz (gap
+pré-existente, ver docstring de `app.navegacao_direta_fluxo`).
 """
 
 from __future__ import annotations
@@ -51,7 +60,7 @@ import httpx
 import psycopg
 from openai import OpenAI
 
-from app import confirmar_presenca_fluxo, dispatcher, eif1, er, injetar_contexto_agendamento, montar_contexto, preparar_input_agenda, processar_remarcacao, reask_engine, state_validator
+from app import confirmar_presenca_fluxo, dispatcher, eif1, er, injetar_contexto_agendamento, montar_contexto, navegacao_direta_fluxo, preparar_input_agenda, processar_remarcacao, reask_engine, state_validator
 from app.agentes import classificar_intencao, empacotar_para_eif1
 
 
@@ -142,6 +151,23 @@ def processar_turno(
             rota_agente=5, agente_usado=None, deve_resetar_sessao=r.deve_resetar_sessao,
             base_final=r.base,
         )
+
+    # WIRING_NAVEGACAO_DIRETA (13/07/2026): 'Precisa Agente Completo?' -> 'Detectar Navegacao' no
+    # n8n real roda em paralelo aos ramos acima, também direto na saída de Extrair Rota — checa
+    # eh_navegacao/eh_troca_data (ambos determinísticos, ver docstring de
+    # app.navegacao_direta_fluxo) e responde SEM Agente LLM quando dá. None -> nem ativo, nem
+    # decidiu (precisa_buscar) ou falhou -> cai pro despacho normal, MESMO fallback do node real
+    # (diferente dos 2 atalhos acima, que não têm fallback pro agente no grafo real).
+    if conn is not None:
+        resultado_nav = navegacao_direta_fluxo.processar(
+            r.base, telefone=base_mc.get("telefone") or "", sessao=sessao, conn=conn, tisaude_client=tisaude_client,
+        )
+        if resultado_nav is not None:
+            return ResultadoTurno(
+                mensagem=resultado_nav.get("mensagem_final") or "", intencao="navegacao_direta",
+                sv_result="", sv_reason="", rota_agente=r.rota_agente, agente_usado=None,
+                deve_resetar_sessao=r.deve_resetar_sessao, base_final=r.base,
+            )
 
     base_agente = r.base
     if r.rota_agente == 4:

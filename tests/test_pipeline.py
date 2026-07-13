@@ -216,3 +216,68 @@ def test_turno_reask_engine_sobrepoe_mensagem_do_agente_quando_sv_bloqueia():
     assert "Não consigo agendar em datas passadas" in r.mensagem
     assert "01/01/2020" in r.mensagem
     assert "marcando" not in r.mensagem
+
+
+def test_turno_troca_direta_responde_sem_chamar_agente():
+    # FIX_TROCA_PERIODO (app.er): pediu período oposto ao salvo, com cache ativo e rota_agente==4
+    # -> eh_troca_data=True. app.navegacao_direta_fluxo assume o turno, sem chamar o agente.
+    ia_output = IAOutputClassificador(intencao_rapida="agenda", rota_agente=4)
+    client = _mock_client(ia_output)  # só 1 resultado — se dispatcher for chamado, StopIteration
+
+    def handler(request):
+        path = request.url.path
+        if path == "/api/login":
+            return httpx.Response(200, json={"access_token": "tok"})
+        if path == "/api/schedule/doctors":
+            return httpx.Response(200, json={"data": [{"id": 11, "name": "Giseli Rebechi"}]})
+        if path.startswith("/api/schedule/20"):
+            return httpx.Response(200, json={"dayAvailable": False})
+        raise AssertionError(f"chamada inesperada: {path}")
+
+    tisaude_client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.fetchone.return_value = None
+    conn.cursor.return_value.__enter__.return_value = cur
+
+    sessao = {
+        "sessao_intencao": "agenda", "sessao_rota": 4, "coleta_unidade": "Vila Olímpia",
+        "coleta_data": "2026-07-20", "coleta_periodo": "manha", "coleta_convenio": "Porto Seguro",
+        "coleta_medico": "Giseli", "sessao_atualizada_em": "2026-07-12T10:00:00+00:00",
+        "agenda_json": {"unidade": "Vila Olímpia", "dias": []},
+    }
+
+    r = processar_turno(
+        busca_paciente_id1=None, busca_paciente_telefone=None, extrair_medico_timeline=None,
+        sessao=sessao, whatsapp_info=WA_INFO, mensagem_agrupada="quero de tarde",
+        historico=[], openai_client=client, tisaude_client=tisaude_client, conn=conn,
+    )
+
+    assert r.agente_usado is None
+    assert r.intencao == "navegacao_direta"
+    assert "Nao encontrei horarios disponiveis" in r.mensagem
+    assert client.beta.chat.completions.parse.call_count == 1
+
+
+def test_turno_sem_conn_pula_navegacao_direta_despacha_normal():
+    # conn=None -> app.navegacao_direta_fluxo nunca é chamado, comportamento idêntico a antes.
+    ia_output = IAOutputClassificador(intencao_rapida="agenda", rota_agente=4)
+    resposta_agente = RespostaAgente(mensagem="ok", estado=EstadoConsulta(i="agenda"))
+    client = _mock_client(ia_output, resposta_agente)
+
+    sessao = {
+        "sessao_intencao": "agenda", "sessao_rota": 4, "coleta_unidade": "Vila Olímpia",
+        "coleta_data": "2026-07-20", "coleta_periodo": "manha", "coleta_convenio": "Porto Seguro",
+        "coleta_medico": "Giseli", "sessao_atualizada_em": "2026-07-12T10:00:00+00:00",
+        "agenda_json": {"unidade": "Vila Olímpia", "dias": []},
+    }
+
+    r = processar_turno(
+        busca_paciente_id1=None, busca_paciente_telefone=None, extrair_medico_timeline=None,
+        sessao=sessao, whatsapp_info=WA_INFO, mensagem_agrupada="quero de tarde",
+        historico=[], openai_client=client,
+    )
+
+    assert r.agente_usado is not None  # despachou pro agente normal, não ficou preso em None
+    assert client.beta.chat.completions.parse.call_count == 2
