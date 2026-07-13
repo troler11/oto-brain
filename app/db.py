@@ -188,6 +188,63 @@ def carregar_memoria_paciente(conn: psycopg.Connection, telefone: str) -> dict |
         return cur.fetchone()
 
 
+def ler_agenda_cache(conn: psycopg.Connection, telefone: str, unidade: str) -> dict | None:
+    """Port fiel do node 'Ler Cache do Postgres1' (sub-workflow 'Ferramenta - Navegar Agenda',
+    `iSO191fJ9Q1FMmVZ`) — mesmo filtro por últimos 11 dígitos do telefone (ignora DDI) e
+    `expira_em > NOW()` usado no resto do módulo. `None` = sem linha (cache expirado/inexistente
+    pra essa unidade), input esperado por `app.navegar_agenda.processar()`."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT agenda_json, indice_atual
+            FROM agenda_cache
+            WHERE RIGHT(regexp_replace(telefone, '\\D', '', 'g'), 11)
+                = RIGHT(regexp_replace(%(telefone)s, '\\D', '', 'g'), 11)
+              AND unidade = %(unidade)s
+              AND expira_em > NOW()
+            LIMIT 1;
+            """,
+            {"telefone": telefone, "unidade": unidade},
+        )
+        return cur.fetchone()
+
+
+def atualizar_indice_agenda_cache(
+    conn: psycopg.Connection, telefone: str, unidade: str, indice_atual: int, dia: dict | None,
+) -> None:
+    """Port fiel do node 'Atualiza Índice no Postgres1' (mesmo sub-workflow) — grava o novo
+    índice de navegação e, se `dia` tiver `data` (resultado OK de `app.navegar_agenda.
+    processar()`), atualiza `ultimo_dia_exibido` com só os campos usados no resto do fluxo
+    (medico/idLocal/idCalendar/horarios) — `COALESCE` no SQL preserva o valor antigo quando
+    `dia` é `None` (status ESGOTADO/DATA_NAO_ENCONTRADA não têm dia novo pra gravar)."""
+    ultimo_dia_exibido = None
+    if dia and dia.get("data"):
+        ultimo_dia_exibido = Jsonb({
+            "data": dia["data"],
+            "medicos": [
+                {"medico": m.get("medico"), "idLocal": m.get("idLocal"), "idCalendar": m.get("idCalendar"),
+                 "horarios": m.get("horarios") or ""}
+                for m in (dia.get("medicos") or [])
+            ],
+        })
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE agenda_cache
+            SET indice_atual = %(indice_atual)s,
+                ultimo_dia_exibido = COALESCE(%(ultimo_dia_exibido)s, ultimo_dia_exibido)
+            WHERE RIGHT(regexp_replace(telefone, '\\D', '', 'g'), 11)
+                = RIGHT(regexp_replace(%(telefone)s, '\\D', '', 'g'), 11)
+              AND unidade = %(unidade)s
+              AND expira_em > NOW();
+            """,
+            {
+                "telefone": telefone, "unidade": unidade, "indice_atual": indice_atual,
+                "ultimo_dia_exibido": ultimo_dia_exibido,
+            },
+        )
+
+
 def salvar_coleta_steps(
     conn: psycopg.Connection,
     telefone: str,

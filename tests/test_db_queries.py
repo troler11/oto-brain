@@ -7,10 +7,12 @@ certo roda com os params certos, não o resultado de uma query real.
 from unittest.mock import MagicMock
 
 from app.db import (
+    atualizar_indice_agenda_cache,
     carregar_historico_conversa,
     carregar_memoria_paciente,
     carregar_sessao,
     computar_params_salvar_sessao,
+    ler_agenda_cache,
     resetar_sessao,
     resetar_sessao_humano,
     salvar_coleta_steps,
@@ -121,6 +123,45 @@ def test_carregar_memoria_paciente_sem_linha_retorna_none():
     conn, cur = _mock_conn()
     cur.fetchone.return_value = None
     assert carregar_memoria_paciente(conn, "5511999999999") is None
+
+
+# ---------- ler_agenda_cache / atualizar_indice_agenda_cache ----------
+
+def test_ler_agenda_cache_retorna_row():
+    conn, cur = _mock_conn()
+    cur.fetchone.return_value = {"agenda_json": {"dias": []}, "indice_atual": 2}
+    r = ler_agenda_cache(conn, "5511999999999", "Vila Olímpia")
+    assert r == {"agenda_json": {"dias": []}, "indice_atual": 2}
+    sql, params = cur.execute.call_args.args
+    assert "FROM agenda_cache" in sql
+    assert "expira_em > NOW()" in sql
+    assert params == {"telefone": "5511999999999", "unidade": "Vila Olímpia"}
+
+
+def test_ler_agenda_cache_sem_linha_retorna_none():
+    conn, cur = _mock_conn()
+    cur.fetchone.return_value = None
+    assert ler_agenda_cache(conn, "5511999999999", "Tatuapé") is None
+
+
+def test_atualizar_indice_agenda_cache_com_dia_grava_ultimo_dia_exibido():
+    conn, cur = _mock_conn()
+    dia = {"data": "2026-07-20", "medicos": [{"medico": "Giseli Rebechi", "idLocal": 1, "idCalendar": 11, "horarios": "09:00"}]}
+    atualizar_indice_agenda_cache(conn, "5511999999999", "Vila Olímpia", 3, dia)
+    sql, params = cur.execute.call_args.args
+    assert "UPDATE agenda_cache" in sql
+    assert params["indice_atual"] == 3
+    assert params["ultimo_dia_exibido"].obj == {
+        "data": "2026-07-20",
+        "medicos": [{"medico": "Giseli Rebechi", "idLocal": 1, "idCalendar": 11, "horarios": "09:00"}],
+    }
+
+
+def test_atualizar_indice_agenda_cache_sem_dia_preserva_ultimo_dia_exibido():
+    conn, cur = _mock_conn()
+    atualizar_indice_agenda_cache(conn, "5511999999999", "Vila Olímpia", 0, None)
+    _, params = cur.execute.call_args.args
+    assert params["ultimo_dia_exibido"] is None
 
 
 # ---------- salvar_coleta_steps ----------
