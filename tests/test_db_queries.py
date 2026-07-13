@@ -12,6 +12,7 @@ from app.db import (
     carregar_memoria_paciente,
     carregar_sessao,
     computar_params_salvar_sessao,
+    criar_fila,
     ler_agenda_cache,
     resetar_sessao,
     resetar_sessao_humano,
@@ -259,3 +260,22 @@ def test_telefone_ja_com_55_nao_duplica():
 def test_deve_resetar_sessao_vira_bool():
     r = computar_params_salvar_sessao({"deve_resetar_sessao": True}, False, None, WA_INFO)
     assert r["deve_resetar_sessao"] is True
+
+
+# ---------- criar_fila ----------
+
+def test_criar_fila_insere_com_status_pendente():
+    conn, cur = _mock_conn()
+    params = {
+        "telefone": "5511999999999", "intencao": "humano", "especialidade": "Não informada",
+        "unidade": "A confirmar", "pagamento": "A confirmar", "para_terceiro": False,
+        "nome_paciente": "A confirmar", "cpf_paciente": "A confirmar", "nascimento": "",
+        "medico": "A confirmar", "periodo": "A confirmar", "motivo_humano": "Atendimento Humano",
+        "observacoes": "",
+    }
+    criar_fila(conn, params)
+    cur.execute.assert_called_once()
+    sql, sent = cur.execute.call_args.args
+    assert "status_atendimento" in sql
+    assert "'PENDENTE'" in sql
+    assert sent == params

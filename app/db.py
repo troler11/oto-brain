@@ -389,6 +389,30 @@ def resetar_sessao_humano(conn: psycopg.Connection, telefone: str) -> None:
         cur.execute("UPDATE contatos_whatsapp SET sessao_id = gen_random_uuid() WHERE telefone = %(telefone)s;", params)
 
 
+def criar_fila(conn: psycopg.Connection, params: dict) -> None:
+    """Port fiel do INSERT compartilhado pelos nós 'Cria fila' e 'Cria Fila (Falha Confirmar)'
+    (mesma query nos dois, só os valores mudam — ver `app.fila_humana.montar_params_cria_fila()`/
+    `montar_params_cria_fila_falha_confirmar()` pro cálculo dos parâmetros). Enfileira uma
+    conversa pra atendente humano em `agendamentos` (`status_atendimento='PENDENTE'`);
+    `nascimento`/`observacoes` vazios viram NULL (`NULLIF`, igual o node real)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO agendamentos (
+              contato_id, intencao, especialidade, unidade, pagamento, para_terceiro,
+              nome_paciente, status_atendimento, cpf_paciente, nascimento_paciente,
+              nome_medico, periodo_atendimento, tipo_consulta, observacoes
+            ) VALUES (
+              (SELECT id FROM contatos_whatsapp WHERE telefone = %(telefone)s),
+              %(intencao)s, %(especialidade)s, %(unidade)s, %(pagamento)s, %(para_terceiro)s,
+              %(nome_paciente)s, 'PENDENTE', %(cpf_paciente)s, NULLIF(%(nascimento)s, '')::DATE,
+              %(medico)s, %(periodo)s, %(motivo_humano)s, NULLIF(%(observacoes)s, '')
+            );
+            """,
+            params,
+        )
+
+
 _INTENCOES_QUE_SALVAM_SESSAO = (
     "navegacao", "confirmacao", "execucao", "concluido", "oferta_humano", "oferta_agendar",
     "confirmar_presenca", "confirmar_presenca_lista", "confirmar_presenca_recusou",
