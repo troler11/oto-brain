@@ -10,20 +10,31 @@ módulo foi escrito originalmente; a versão anterior buscava por `id_tisaude` v
 de consulta próprio (`dataISO`/`dataBR`/`hora`/`medico`/`status_id`/`status_nome`, cap 8) que já
 bate 1:1 com o que `app.formatar_verificar_confirmar` espera, sem precisar de adapter).
 
-Lado MUTAÇÃO é port fiel (mapeado, mas NÃO implementado) do sub-workflow 'Ferramenta - Confirmar
-Presença' (id `QKwWFLrBaBC5hew3`, mesma auditoria): `POST /schedule/status/update/{id}/3` (já é
-`tisaude.confirmar_presenca()`) **+ um UPDATE em `agendamentos`** (`status_atendimento =
-'CONFIRMADO'`, `observacoes = 'Presença confirmada pelo paciente via WhatsApp'` WHERE
-`id_itsaude = id_agendamento`) — essa segunda parte (Postgres) ainda não tinha sido mapeada
-antes desta auditoria. Ambas ficam de fora por escopo (ver abaixo), mas agora documentadas
-completas pra quando o cutover acontecer.
+Lado MUTAÇÃO — port fiel completo (13/07/2026, tarde: `get_workflow_details` no sub-workflow
+inteiro, 10 nós, draft==ativo sem divergência) do sub-workflow 'Ferramenta - Confirmar Presença'
+(id `QKwWFLrBaBC5hew3`): `confirmar_presenca_completo()` abaixo. `POST
+/schedule/status/update/{id}/3` (já era `tisaude.confirmar_presenca()`, reusado) + um UPDATE em
+`agendamentos` (`status_atendimento = 'CONFIRMADO'`, `observacoes = 'Presença confirmada pelo
+paciente via WhatsApp'`). Dois achados de fidelidade no node real: (1) o node `If1` (que decide
+sucesso/erro na formatação final) reavalia `id_agendamento` do TRIGGER, não o resultado da
+chamada TiSaude — como esse campo não muda entre o `If` inicial e o `If1`, a branch de erro
+(`Formatar Erro Confirmação`) é código morto, nunca alcançado na prática (o node HTTP não tem
+`onError`/`continueOnFail`, então uma falha real de API simplesmente para a execução inteira —
+replicado aqui deixando `tisaude.confirmar_presenca()` propagar a exceção sem try/except). (2) o
+UPDATE usa `$json.id_itsaude`, que vem da SELECT anterior (`Buscar agendamento`), não direto do
+`id_agendamento` do trigger — se a linha não existir localmente no Postgres (`agendamentos`
+dessincronizado da TiSaude), o UPDATE é um no-op silencioso (0 linhas), mas a função ainda
+retorna sucesso (a TiSaude já confirmou, é isso que importa pro paciente). Replicado com o mesmo
+comportamento (SELECT primeiro, UPDATE com o que achou ou `None`).
 
-Escopo decidido com Lucas (13/07/2026): só LEITURA por enquanto. `/route` ainda roda em shadow
-(n8n decide de verdade — Fase 2/cutover pendente, ver
-C:\\Users\\lucas\\.claude\\plans\\unified-coalescing-puppy.md). Chamar a mutação real a cada
-turno de shadow confirmaria presença de paciente (TiSaude E Postgres) sem essa ser a resposta
-real dada a ele — por isso o caminho "auto_confirmar" aqui NÃO muta nada ainda, só decide e loga
-o que FARIA. Ativar a mutação real fica pro cutover, decisão explícita futura.
+⚠️ ESCOPO (13/07/2026): `confirmar_presenca_completo()` MUTA de verdade (TiSaude real +
+Postgres) — código pronto, mas NÃO ligado a nenhum dispatcher/agente/tool, mesma trava dos
+outros 3 fluxos de mutação (`criar_consulta_fluxo`/`criar_consulta_terceiro_fluxo`/
+`cancelar_consulta_fluxo`). Só entra em uso depois do cutover (Fase 2, `/route` ainda roda em
+shadow). O caminho de LEITURA (`processar_rota5`/`buscar_consultas_paciente`, resto deste
+módulo) continua ligado normalmente — decisão original (13/07/2026, manhã): `/route` roda em
+shadow, então o caminho "auto_confirmar" de `processar_rota5` só decide e loga o que FARIA, sem
+chamar `confirmar_presenca_completo()`.
 
 IO real (login + busca + timeline) é envolvido em try/except: falha de rede/API na TiSaude
 durante um turno de shadow não pode derrubar `/route` — cai pro mesmo fallback de antes da
@@ -121,3 +132,29 @@ def processar_rota5(base: dict, *, client: httpx.Client | None = None) -> dict |
         return resultado
 
     return None
+
+
+def confirmar_presenca_completo(
+    id_agendamento: str | int | None, *, conn, tisaude_client: httpx.Client | None = None,
+) -> dict:
+    """Port fiel do sub-workflow 'Ferramenta - Confirmar Presença' (`QKwWFLrBaBC5hew3`) —
+    MUTA de verdade: confirma presença na TiSaude (`STATUS_CONFIRMAR=3`) + UPDATE em
+    `agendamentos`. NÃO ligado a nenhum dispatcher/agente/tool (ver docstring do módulo)."""
+    id_str = str(id_agendamento or "").strip()
+    if not id_str or id_str == "null":
+        return {"status": "ERRO_INPUT", "resultado": "ID do agendamento não informado. Não é possível confirmar a presença."}
+
+    token = tisaude.login(client=tisaude_client)
+    tisaude.confirmar_presenca(int(id_str), token, client=tisaude_client)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT id_itsaude FROM agendamentos WHERE id_itsaude = %s", (id_str,))
+        row = cur.fetchone()
+        id_itsaude_local = row[0] if row else None
+        cur.execute(
+            "UPDATE agendamentos SET status_atendimento = 'CONFIRMADO', "
+            "observacoes = 'Presença confirmada pelo paciente via WhatsApp' WHERE id_itsaude = %s",
+            (id_itsaude_local,),
+        )
+
+    return {"status": "CONFIRMADO", "id_agendamento": id_str, "resultado": "Presença confirmada com sucesso!"}

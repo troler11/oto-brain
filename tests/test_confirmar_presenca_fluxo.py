@@ -1,13 +1,18 @@
 """
 Testes de app/confirmar_presenca_fluxo.py — orquestração do rota_agente==5 (confirmar presença)
-com o client TiSaude real (sem rede: httpx.MockTransport). Escopo só LEITURA (13/07/2026): a
-mutação real (TiSaude + UPDATE em `agendamentos`) NUNCA é chamada por este módulo ainda — os
-testes abaixo confirmam isso explicitamente (nenhum handler mocka o endpoint de status/update).
+com o client TiSaude real (sem rede: httpx.MockTransport).
+
+`processar_rota5`/`buscar_consultas_paciente` (leitura, ligados ao pipeline): a mutação real
+NUNCA é chamada por eles — os testes correspondentes abaixo confirmam isso explicitamente
+(nenhum handler mocka o endpoint de status/update). `confirmar_presenca_completo` (mutação, NÃO
+ligado a nenhum dispatcher/agente/tool — ver docstring do módulo) tem seção própria de testes.
 """
+
+from unittest.mock import MagicMock
 
 import httpx
 
-from app.confirmar_presenca_fluxo import buscar_consultas_paciente, processar_rota5
+from app.confirmar_presenca_fluxo import buscar_consultas_paciente, confirmar_presenca_completo, processar_rota5
 
 TIMELINE = {
     "data": [
@@ -114,3 +119,79 @@ def test_falha_de_rede_na_tisaude_nao_derruba_devolve_none():
     base = {"_sub_confirmar": "verificar", "cpf": "11144477735"}
     client = httpx.Client(transport=httpx.MockTransport(handler))
     assert processar_rota5(base, client=client) is None
+
+
+# ---------- confirmar_presenca_completo (mutação, NÃO ligado a nenhum dispatcher) ----------
+
+def _mock_conn(row=(999,)):
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.fetchone.return_value = row
+    conn.cursor.return_value.__enter__.return_value = cur
+    return conn, cur
+
+
+def _handler_confirmar(status_resp=None):
+    status_resp = status_resp if status_resp is not None else {"success": True}
+
+    def handler(request):
+        path = request.url.path
+        if path == "/api/login":
+            return httpx.Response(200, json={"access_token": "tok"})
+        if path == "/api/schedule/status/update/999/3":
+            return httpx.Response(200, json=status_resp)
+        raise AssertionError(f"chamada inesperada: {path}")
+
+    return handler
+
+
+def test_confirmar_presenca_completo_sucesso_chama_tisaude_e_atualiza_postgres():
+    client = httpx.Client(transport=httpx.MockTransport(_handler_confirmar()))
+    conn, cur = _mock_conn(row=(999,))
+    r = confirmar_presenca_completo("999", conn=conn, tisaude_client=client)
+    assert r == {"status": "CONFIRMADO", "id_agendamento": "999", "resultado": "Presença confirmada com sucesso!"}
+    update_sql, update_params = cur.execute.call_args_list[1].args
+    assert "UPDATE agendamentos" in update_sql
+    assert "status_atendimento = 'CONFIRMADO'" in update_sql
+    assert update_params == (999,)
+
+
+def test_confirmar_presenca_completo_sem_id_nao_chama_tisaude():
+    def handler(request):
+        raise AssertionError(f"não deveria chamar TiSaude sem id_agendamento: {request.url.path}")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    conn, cur = _mock_conn()
+    r = confirmar_presenca_completo(None, conn=conn, tisaude_client=client)
+    assert r["status"] == "ERRO_INPUT"
+    cur.execute.assert_not_called()
+
+
+def test_confirmar_presenca_completo_linha_local_ausente_atualiza_com_none():
+    # 'Buscar agendamento' não achou a linha localmente (Postgres dessincronizado da TiSaude) —
+    # UPDATE roda com id_itsaude=None (no-op, 0 linhas), mas a função ainda retorna sucesso: a
+    # TiSaude já confirmou de verdade, é isso que importa pro paciente (fiel ao node real).
+    client = httpx.Client(transport=httpx.MockTransport(_handler_confirmar()))
+    conn, cur = _mock_conn(row=None)
+    r = confirmar_presenca_completo("999", conn=conn, tisaude_client=client)
+    assert r["status"] == "CONFIRMADO"
+    update_params = cur.execute.call_args_list[1].args[1]
+    assert update_params == (None,)
+
+
+def test_confirmar_presenca_completo_falha_tisaude_propaga_excecao():
+    # node HTTP real não tem onError/continueOnFail -> falha para a execução inteira, sem
+    # mensagem de erro graciosa. Preservado: sem try/except em volta de tisaude.confirmar_presenca.
+    def handler(request):
+        if request.url.path == "/api/login":
+            return httpx.Response(200, json={"access_token": "tok"})
+        return httpx.Response(500, json={"error": "falha"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    conn, cur = _mock_conn()
+    try:
+        confirmar_presenca_completo("999", conn=conn, tisaude_client=client)
+        assert False, "deveria ter propagado exceção"
+    except httpx.HTTPStatusError:
+        pass
+    cur.execute.assert_not_called()
