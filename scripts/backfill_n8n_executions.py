@@ -60,18 +60,27 @@ def _headers() -> dict:
 
 
 def listar_execucoes(client: httpx.Client, since: str | None):
-    """Gera IDs+metadados de execução (sem includeData) via paginação por cursor."""
+    """Gera IDs+metadados de execução (sem includeData) via paginação por cursor.
+
+    A API REST do n8n NÃO tem filtro por data (`startedAfter` não existe — confirmado 13/07/2026,
+    `{"message":"Unknown query parameter 'startedAfter'"}`, 400). `since` é filtrado no cliente:
+    como a API devolve execuções em ordem decrescente de `startedAt` (mais recente primeiro),
+    paramos de paginar assim que achamos a primeira execução mais antiga que `since` — sem isso
+    o script paginaria as ~8.700 execuções inteiras toda vez."""
+    since_dt = datetime.fromisoformat(since).replace(tzinfo=timezone.utc) if since else None
     cursor = None
     while True:
         params = {"workflowId": MAIN_WORKFLOW_ID, "limit": PAGE_LIMIT}
         if cursor:
             params["cursor"] = cursor
-        if since:
-            params["startedAfter"] = since
         r = client.get(f"{N8N_BASE_URL}/api/v1/executions", params=params, headers=_headers())
         r.raise_for_status()
         body = r.json()
         for item in body.get("data", []):
+            if since_dt is not None:
+                iniciado_em = datetime.fromisoformat(item["startedAt"].replace("Z", "+00:00"))
+                if iniciado_em < since_dt:
+                    return
             yield item
         cursor = body.get("nextCursor")
         if not cursor:
