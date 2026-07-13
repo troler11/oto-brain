@@ -35,7 +35,8 @@ _RE_DESFECHO_SUCESSO = re.compile(
     r"presença confirmada|consulta (agendada|confirmada|cancelada)|"
     r"cancelad[ao] com sucesso|agendad[ao] com sucesso|prontinho.*confirmad|"
     r"já está confirmada|não encontrei (consultas|nenhuma consulta)|"
-    r"até logo|até mais|tenha um [oó]timo dia",
+    r"até logo|até mais|tenha um [oó]timo dia|"
+    r"se precisar.{0,20}(chamar|falar|avisar)",
     re.IGNORECASE,
 )
 

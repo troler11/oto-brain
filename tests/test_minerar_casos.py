@@ -77,6 +77,15 @@ def test_desistencia_nao_dispara_em_despedida():
     assert not any(c["categoria"] == "desistencia" for c in casos)
 
 
+def test_desistencia_nao_dispara_em_se_precisar_de_algo():
+    msgs = [
+        _msg(0, "Obrigada", "paciente"),
+        _msg(1, "Tudo bem! Se precisar de algo é só chamar. 😊", "ia_ou_recepcao"),
+    ]
+    casos = minerar_telefone("tel", msgs, tem_agendamento=False)
+    assert not any(c["categoria"] == "desistencia" for c in casos)
+
+
 def test_desistencia_nao_dispara_se_ultima_msg_e_desfecho_de_sucesso():
     # FIX_DESISTENCIA_FALSO_POSITIVO: "Prontinho! Presença confirmada" não precisa de resposta —
     # não é abandono, é fim normal da conversa.
