@@ -14,6 +14,12 @@ Monta o `base` que alimenta o Extrair Rota a partir de 5 fontes upstream do n8n:
 Cada um vira um parâmetro explícito de `processar()` — não há leitura de rede/DB aqui, só
 transformação pura, igual ao node original.
 
+Exceção declarada (não port fiel): `memoria_paciente` (Fase 4, `app.db.carregar_memoria_paciente`)
+é injetado só pra personalizar a saudação de paciente não encontrado no TiSaude ainda —
+ver comentário FASE4_MEMORIA_SAUDACAO no bloco `num_pacs == 0`. Aprovado com Lucas em 12/07/2026
+(versão conservadora: reconhece "de volta" sem citar médico/unidade — telefone pode ser
+compartilhado entre dependentes).
+
 Diferença deliberada (NÃO unificada) com `app.er`: o `telefone` calculado aqui tira o prefixo
 "55" (`.replace(/^55/, '')`), enquanto o `telefone` recomputado dentro do próprio Extrair Rota
 (`app.er.processar_intake`), a partir do MESMO `whatsapp_info`, mantém o "55". São usos
@@ -224,6 +230,7 @@ def processar(
     sessao: dict | None,
     whatsapp_info: dict | None,
     mensagem_agrupada: str,
+    memoria_paciente: dict | None = None,
 ) -> ResultadoMontarContexto:
     # ── Dados do paciente (FIX_FICHA_COMPLETA) ──────────────────────────
     pacientes = [p for p in (busca_paciente_id1 or []) if p and p.get("id")]
@@ -433,12 +440,20 @@ def processar(
         )
 
     if num_pacs == 0:
+        # FASE4_MEMORIA_SAUDACAO: telefone reconhecido em paciente_memoria mesmo sem match de
+        # CPF/ID no TiSaude ainda — reconhece SEM citar médico/unidade/convênio (telefone pode
+        # ser compartilhado entre dependentes; afirmar dado específico do titular arriscaria
+        # personalizar errado pra quem não é ele). Único trecho deste bloco que NÃO é port fiel
+        # do node original — resto do arquivo continua 1:1 com o JS.
+        saudacao_intro = (
+            "Olá de novo! 👋 Bem-vindo de volta à Oto-SP!" if memoria_paciente else "Olá! 👋 Bem-vindo à Oto-SP!"
+        )
         saudacao_section = (
             "━━━ SAUDAÇÃO ━━━\n"
             'Ative APENAS para: "oi", "olá", "bom dia", "boa tarde", "boa noite", "tudo bem" — sem intenção de agendamento.\n'
             '⛔ NÃO ative para: "agendar", "marcar", nome de NOMES, "para mim", "outra pessoa" → vá direto ao passo 1.\n'
             "Resposta:\n"
-            '"Olá! 👋 Bem-vindo à Oto-SP! O que deseja?\n'
+            f'"{saudacao_intro} O que deseja?\n'
             "1️⃣ Agendar consulta\n"
             "2️⃣ Remarcar consulta\n"
             "3️⃣ Cancelar consulta\n"

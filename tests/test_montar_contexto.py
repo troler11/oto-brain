@@ -225,6 +225,22 @@ def test_saudacao_section_com_paciente_delega_ao_agente():
     assert r.saudacao_section == "# Saudação tratada pelo Agente Triagem/Ver"
 
 
+def test_saudacao_section_sem_memoria_texto_padrao():
+    r = _run()
+    assert '"Olá! 👋 Bem-vindo à Oto-SP!' in r.saudacao_section
+    assert "de volta" not in r.saudacao_section
+
+
+def test_saudacao_section_com_memoria_reconhece_sem_citar_medico():
+    memoria = {"ultimo_medico": "Dra. Giseli Rebechi", "ultima_unidade": "Vila Olímpia"}
+    r = _run(memoria_paciente=memoria)
+    assert '"Olá de novo! 👋 Bem-vindo de volta à Oto-SP!' in r.saudacao_section
+    # nunca cita médico/unidade — telefone pode ser compartilhado entre dependentes
+    assert "Giseli" not in r.saudacao_section
+    assert "Vila Olímpia" not in r.saudacao_section
+    assert "$$$" in r.saudacao_section
+
+
 # ---------- p3_menu ----------
 
 def test_p3_menu_com_ultimo_medico_unico_paciente():

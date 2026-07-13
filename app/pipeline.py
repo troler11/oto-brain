@@ -58,13 +58,13 @@ def processar_turno(
 ) -> ResultadoTurno:
     mc = montar_contexto.processar(
         busca_paciente_id1, busca_paciente_telefone, extrair_medico_timeline,
-        sessao, whatsapp_info, mensagem_agrupada,
+        sessao, whatsapp_info, mensagem_agrupada, memoria_paciente,
     )
     base_mc = mc.to_dict()
     # Campo extra, fora do port fiel de Montar Contexto — bootstrap Fase 4 (paciente_memoria,
-    # carregar_memoria_paciente). Fica disponível pro template engine ({{ $('Montar
-    # Contexto').first().json.memoria_paciente... }}) mas nenhum prompt referencia ainda —
-    # inerte até essa mudança ser proposta e aprovada (regra de prompt/fluxo do CLAUDE.local.md).
+    # carregar_memoria_paciente). Além de alimentar saudacao_section acima, fica disponível pro
+    # template engine ({{ $('Montar Contexto').first().json.memoria_paciente... }}) pra usos
+    # futuros ainda não propostos.
     base_mc["memoria_paciente"] = memoria_paciente
 
     ia_output = classificar_intencao(
