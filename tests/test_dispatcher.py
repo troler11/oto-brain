@@ -146,14 +146,28 @@ def test_despachar_turno_com_conn_liga_tools_pro_agente_agenda():
     assert nomes == {"buscar_agenda", "navegar_agenda"}
 
 
-def test_despachar_turno_com_conn_nao_liga_tools_pro_agente_navegacao():
-    # "Agente Navegacao" tem tools com o MESMO nome no n8n mas sub-workflow ainda não
-    # confirmado como sendo o mesmo — não deve ganhar as tools por engano.
+def test_despachar_turno_com_conn_liga_tools_pro_agente_navegacao():
+    # "Agente Navegacao" tem tools com os MESMOS nomes/workflowIds do "Agente Agenda"
+    # (confirmado via get_workflow_details 13/07/2026) — deve ganhar as tools também.
     esperado = RespostaAgente(mensagem="ok", estado=EstadoConsulta(i="navegacao"))
     client = _mock_client(esperado)
+    client.beta.chat.completions.parse.return_value.choices[0].message.tool_calls = None
     conn = MagicMock()
     despachar_turno(
         _resultado(rota_agente=4, base={"_sub_rota_agenda": "navegacao"}), [], base_mc={}, client=client, conn=conn,
+    )
+    kwargs = client.beta.chat.completions.parse.call_args.kwargs
+    nomes = {t["function"]["name"] for t in kwargs["tools"]}
+    assert nomes == {"buscar_agenda", "navegar_agenda"}
+
+
+def test_despachar_turno_com_conn_nao_liga_tools_pra_confirmacao_ainda():
+    # "confirmacao"/"executor" ainda não investigados — não assumir sem checar.
+    esperado = RespostaAgente(mensagem="ok", estado=EstadoConsulta(i="confirmacao"))
+    client = _mock_client(esperado)
+    conn = MagicMock()
+    despachar_turno(
+        _resultado(rota_agente=4, base={"_sub_rota_agenda": "confirmacao"}), [], base_mc={}, client=client, conn=conn,
     )
     kwargs = client.beta.chat.completions.parse.call_args.kwargs
     assert "tools" not in kwargs or kwargs["tools"] is None

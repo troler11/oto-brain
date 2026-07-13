@@ -39,10 +39,11 @@ from app.template_engine import renderizar
 from app.tools_agenda import TOOLS_AGENDA, construir_executores
 
 # Agentes que ganham as tools reais de agenda (buscar_agenda/navegar_agenda) quando `conn` é
-# passado — só "agenda" (prompt agente_agenda.txt) confirmado via get_workflow_details 13/07/2026
-# como dono dessas duas tools; "navegacao"/"confirmacao"/"executor" ainda não investigados (podem
-# ter sub-workflows diferentes com o mesmo nome de tool — não assumir).
-_AGENTES_COM_TOOLS_AGENDA = {"agenda"}
+# passado. "agenda" e "navegacao" confirmados via get_workflow_details 13/07/2026 — os nós
+# "Agente Agenda" e "Agente Navegacao" apontam pros MESMOS dois sub-workflows
+# (gMQaU2CQbwdPUnUA/iSO191fJ9Q1FMmVZ), schema idêntico (só descrição de dia_semana com redação
+# diferente, semântica igual). "confirmacao"/"executor" ainda não investigados.
+_AGENTES_COM_TOOLS_AGENDA = {"agenda", "navegacao"}
 
 PASTA_PROMPTS = Path(__file__).resolve().parent.parent / "prompts"
 

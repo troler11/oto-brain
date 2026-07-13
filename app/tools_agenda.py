@@ -7,9 +7,11 @@ Descrições/schemas copiados literalmente dos nós `Tool Buscar (Agenda)`/`Tool
 (workflow n8n `oX6ePJbAVF7C0NoX`, nó "Agente Agenda"), lidos via `get_workflow_details`
 13/07/2026 — é o texto que o modelo vê pra decidir quando chamar cada tool, preservado 1:1.
 
-Só ligado no dispatcher pro agente "agenda" (prompt `agente_agenda.txt`) — o "Agente Navegacao"
-tem tools com os MESMOS nomes mas sub-workflows ainda não confirmados como sendo os mesmos
-(não investigado), não assumir sem checar.
+Ligado no dispatcher pros agentes "agenda" e "navegacao" (`agente_agenda.txt`/
+`agente_navegacao.txt`) — confirmado via `get_workflow_details` 13/07/2026 que os nós "Agente
+Agenda" e "Agente Navegacao" no n8n apontam pros MESMOS dois sub-workflows (schema idêntico, só
+a descrição de `dia_semana` tem redação diferente entre os dois, semântica igual — preservada
+aqui como a versão do "Agente Agenda"). "confirmacao"/"executor" ainda não investigados.
 """
 
 from __future__ import annotations
