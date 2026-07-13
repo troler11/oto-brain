@@ -198,6 +198,14 @@ def test_ver_escolher_titular_numero_invalido():
     assert r.intencao_rapida == "ver_escolher"
 
 
+def test_ver_escolher_titular_invalido_ecoa_mensagem_original():
+    # JS: '"] ' + textoUsuario — o port tinha cortado esse eco (achado em replay contra tráfego
+    # real, exec 68907).
+    b = _base(sessao_intencao="ver_escolher", pacientes=[{"nome": "JOAO"}, {"nome": "MARIA"}])
+    r = _proc("quero saber o horário do número 2", base=b)
+    assert r.base["texto_ia"].endswith("quero saber o horário do número 2")
+
+
 # ---------- HORARIO AMBIGUO ----------
 
 def test_horario_solto_sem_contexto():

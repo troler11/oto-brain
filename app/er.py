@@ -853,7 +853,7 @@ def processar_intake(
             menu_ve = "\n".join(f'{i + 1}. {p.get("nome") or f"Titular {i + 1}"}' for i, p in enumerate(pacs_ve))
             base["texto_ia"] = (
                 f'[VER ESCOLHER TITULAR INVALIDO: paciente digitou "{texto_usuario.strip()}". Responder EXATAMENTE: '
-                f'"Não entendi. De quem você quer ver as consultas?\n\n{menu_ve}"]'
+                f'"Não entendi. De quem você quer ver as consultas?\n\n{menu_ve}"] ' + texto_usuario
             )
 
     # HORARIO AMBIGUO (sem contexto de agendamento ativo)
@@ -910,10 +910,11 @@ def _int(v, default=0) -> int:
 
 
 def _to_int_or_none(s: str):
-    try:
-        return int(s)
-    except ValueError:
-        return None
+    """Réplica de `parseInt(s, 10)` do JS — lê sinal opcional + dígitos líderes, ignora o resto
+    da string (`parseInt("1,23")===1`, `parseInt("1  \\n2")===1`); `int(s)` do Python é estrito
+    e rejeitava esses casos (achado em replay contra tráfego real, exec 68785/68992)."""
+    m = re.match(r"\s*[+-]?\d+", s or "")
+    return int(m.group()) if m else None
 
 
 def _search_index(pattern: str, s: str) -> int:
@@ -1359,6 +1360,7 @@ def processar_convenio_menu_agenda(
     menu_opt: str,
     ia_rota_original: int,
     motivo_humano: str | None = None,
+    eh_mensagem_informativa: bool = False,
 ) -> ResultadoParte3:
     txt_norm = _norm(texto_usuario)
 
@@ -1513,6 +1515,7 @@ def processar_convenio_menu_agenda(
     # FIX_PARTICULAR_PRECO
     rota_coleta_pp = rota_agente in (2, 3) or _int(base.get("sessao_rota")) in (2, 3)
     if (rota_coleta_pp and re.search(r"\bparticular\b", txt_norm) and not (base.get("coleta_convenio") or "").strip()
+            and not eh_mensagem_informativa
             and not ia_output.get("bypass_agente_humano") and _texto_ia_livre(base)):
         base["texto_ia"] = (
             '[PARTICULAR PRECO: paciente escolheu Particular. Setar conv="PART?" no $$$. Responder EXATAMENTE: '
@@ -6151,6 +6154,7 @@ def processar(
     r3 = processar_convenio_menu_agenda(
         base, texto_usuario, intencao_rapida, rota_agente, ia_output,
         r1.eh_cancel_real, r1.eh_sessao_nova, r1.menu_opt, r1.ia_rota_original, r2.motivo_humano,
+        r1.eh_mensagem_informativa,
     )
     base, intencao_rapida, rota_agente = r3.base, r3.intencao_rapida, r3.rota_agente
     sub_rota_agenda, esta_em_agenda_ativa = r3.sub_rota_agenda, r3.esta_em_agenda_ativa

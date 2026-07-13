@@ -4,7 +4,7 @@ Testes da Parte 3 do port do ER (app/er.py::processar_convenio_menu_agenda) — 
 atraso, ofertas pendentes, promocao pra rota=4, backstop de identidade.
 """
 
-from app.er import processar_convenio_menu_agenda
+from app.er import _to_int_or_none, processar_convenio_menu_agenda
 
 
 def _base(**overrides):
@@ -35,12 +35,31 @@ def _base(**overrides):
 
 
 def _proc(texto, base=None, intencao_rapida="triagem", rota_agente=0, ia_output=None,
-          eh_cancel_real=False, eh_sessao_nova=True, menu_opt=None, ia_rota_original=0):
+          eh_cancel_real=False, eh_sessao_nova=True, menu_opt=None, ia_rota_original=0,
+          eh_mensagem_informativa=False):
     return processar_convenio_menu_agenda(
         base or _base(), texto, intencao_rapida, rota_agente, ia_output or {},
         eh_cancel_real, eh_sessao_nova, menu_opt if menu_opt is not None else texto.strip(),
-        ia_rota_original,
+        ia_rota_original, None, eh_mensagem_informativa,
     )
+
+
+# ---------- _to_int_or_none (parseInt do JS, achado em replay contra tráfego real) ----------
+
+def test_to_int_or_none_leading_digit_ignora_lixo():
+    assert _to_int_or_none("1,23") == 1
+
+
+def test_to_int_or_none_espacos_e_quebra_de_linha():
+    assert _to_int_or_none("1  \n2") == 1
+
+
+def test_to_int_or_none_sem_digito_lider_none():
+    assert _to_int_or_none("quero 2") is None
+
+
+def test_to_int_or_none_vazio_none():
+    assert _to_int_or_none("") is None
 
 
 # ---------- FIX_OMINT_V2 ----------
@@ -112,6 +131,16 @@ def test_particular_preco_sem_convenio_mostra_precos():
     assert "600,00" in r.base["texto_ia"]
 
 
+def test_particular_preco_mensagem_informativa_nao_dispara_guard():
+    # Achado em replay contra tráfego real (exec 68015): "gostaria de saber o valor, no caso
+    # seria particular" é pergunta informativa — quem deve responder é o FAQ tag=PART, não esse
+    # guard (que assume o paciente ESCOLHEU particular, não está só perguntando o preço).
+    b = _base(coleta_convenio="", sessao_rota=2)
+    r = _proc("mas antes gostaria de saber o valor, no caso seria particular", base=b, rota_agente=2,
+              eh_mensagem_informativa=True)
+    assert "PARTICULAR PRECO" not in r.base["texto_ia"]
+
+
 # ---------- MENU PRINCIPAL ----------
 
 def test_menu_opcao_1_pergunta_para_quem():
@@ -161,6 +190,26 @@ def test_confirmar_presenca_escolher_numero_valido():
     assert r.rota_agente == 5
     assert r.intencao_rapida == "confirmar_presenca"
     assert r.base["nome_dependente"] == "B"
+
+
+def test_confirmar_presenca_escolher_numero_com_lixo_apos_virgula():
+    # Achado em replay contra tráfego real (exec 68785): paciente respondeu "1,23" — JS
+    # parseInt lê o "1" líder e ignora o resto; _to_int_or_none precisa fazer o mesmo.
+    b = _base(sessao_intencao="confirmar_presenca_escolher",
+              pacientes=[{"nome": "A", "id_tisaude": "1", "cpf": "111"}, {"nome": "B", "id_tisaude": "2", "cpf": "222"}])
+    r = _proc("1,23", base=b, eh_sessao_nova=False)
+    assert r.rota_agente == 5
+    assert r.intencao_rapida == "confirmar_presenca"
+    assert r.base["nome_dependente"] == "A"
+
+
+def test_confirmar_presenca_escolher_numero_com_quebra_de_linha():
+    # exec 68992: "1  \n2" — mesmo padrão, lixo depois do dígito líder.
+    b = _base(sessao_intencao="confirmar_presenca_escolher",
+              pacientes=[{"nome": "A", "id_tisaude": "1", "cpf": "111"}, {"nome": "B", "id_tisaude": "2", "cpf": "222"}])
+    r = _proc("1  \n2", base=b, eh_sessao_nova=False)
+    assert r.intencao_rapida == "confirmar_presenca"
+    assert r.base["nome_dependente"] == "A"
 
 
 def test_confirmar_presenca_escolher_loop_guard_vai_pra_humano():
