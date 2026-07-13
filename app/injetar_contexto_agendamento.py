@@ -84,7 +84,15 @@ def processar(base: dict) -> dict:
     # ── "sim" confirmando agendamento já pendente ──────────────────────
     eh_sim_positivo = any(msg_sem_pontuacao == s for s in _SIMS_POSITIVOS)
 
-    if eh_sim_positivo and base.get("eh_confirmacao") and udi.get("medicos"):
+    # FIX_LOOP_CONFIRMACAO (13/07): `eh_confirmacao` vem do classificador LLM (Mini IA) e falha
+    # com frequência em detectar "sim"/"correto" como resposta ao "[CONFIRMAÇÃO PENDENTE]" —
+    # achado na revisão manual de casos_aprendizado (~9 telefones, loop volta a mostrar horários
+    # em vez de agendar). Backstop determinístico: esta função só roda dentro de rota_agente==4
+    # (agenda) já — combinado com a palavra exata de confirmação e um dia de agenda recém-
+    # exibido (`udi`), é sinal suficiente sem depender do classificador acertar toda vez.
+    eh_confirmacao_valida = bool(base.get("eh_confirmacao")) or bool(udi.get("data"))
+
+    if eh_sim_positivo and eh_confirmacao_valida and udi.get("medicos"):
         primeiro_dr = resolver_medico(udi["medicos"])
         data_conf = udi["data"]
         hora_conf = base.get("coleta_horario") or primeiro_dr["horarios"].split(", ")[0]

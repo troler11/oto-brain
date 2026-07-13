@@ -58,6 +58,25 @@ def test_sim_positivo_com_email_cadastrado_chama_tool_direto():
     assert r["data_agendamento"] == "2026-07-14"
 
 
+def test_sim_positivo_confirma_mesmo_sem_classificador_marcar_eh_confirmacao():
+    # FIX_LOOP_CONFIRMACAO: regressão dos casos #21/#22/#30/#31/#84/#85/#92/#93/#101/#102 (revisão
+    # manual de casos_aprendizado) — classificador LLM não marcou eh_confirmacao=True, mas o
+    # backstop determinístico (udi presente + palavra exata) deve processar a confirmação assim
+    # mesmo, em vez de cair no fallback que reexibe os horários.
+    r = processar(_base(
+        texto_ia="Correto", ultimo_dia_exibido=UDI_VO, eh_confirmacao=False,
+        coleta_id_tisaude="1", pacientes=[{"id_tisaude": "1", "email": "lucas@x.com"}],
+    ))
+    assert "[EMAIL JA CADASTRADO]" in r["texto_ia"]
+    assert r["medico_agendamento"] == "Giseli Rebechi"
+    assert r["data_agendamento"] == "2026-07-14"
+
+
+def test_sim_positivo_sem_udi_data_e_sem_eh_confirmacao_nao_confirma():
+    r = processar(_base(texto_ia="sim", ultimo_dia_exibido=None, eh_confirmacao=False))
+    assert r["eh_confirmacao"] is False
+
+
 def test_sim_positivo_sem_email_pede_email():
     r = processar(_base(texto_ia="sim", ultimo_dia_exibido=UDI_VO, eh_confirmacao=True))
     assert "Qual seu email para confirmação?" in r["texto_ia"]
