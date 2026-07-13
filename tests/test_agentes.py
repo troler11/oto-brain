@@ -55,6 +55,17 @@ def test_chamar_agente_usa_model_customizado():
     assert client.beta.chat.completions.parse.call_args.kwargs["model"] == "gpt-4o-mini"
 
 
+def test_chamar_agente_sem_tools_nunca_manda_none_pro_sdk():
+    # O SDK real da OpenAI itera `tools` incondicionalmente em `_validate_input_tools` — mandar
+    # `tools=None` quebra com TypeError na hora ('NoneType' object is not iterable). Achado em
+    # smoke test real de produção (13/07/2026) — nenhum dos outros testes pegava isso porque o
+    # client mockado aqui não reexecuta essa validação do SDK.
+    esperado = RespostaAgente(mensagem="ok", estado=EstadoConsulta(i="triagem"))
+    client = _mock_client(esperado)
+    chamar_agente("SYSTEM", [], client=client)
+    assert client.beta.chat.completions.parse.call_args.kwargs["tools"] == []
+
+
 # ---------- chamar_agente com tool-calling (Fase 3, 13/07/2026) ----------
 
 def _tool_call(id_, name, arguments: dict):

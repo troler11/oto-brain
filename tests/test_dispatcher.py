@@ -130,7 +130,9 @@ def test_despachar_turno_sem_conn_nao_liga_tools_mesmo_pra_agenda():
     client = _mock_client(esperado)
     despachar_turno(_resultado(rota_agente=4), [], base_mc={}, client=client)
     kwargs = client.beta.chat.completions.parse.call_args.kwargs
-    assert "tools" not in kwargs or kwargs["tools"] is None
+    # tools=None quebra o SDK real (_validate_input_tools itera incondicionalmente) — chamar_agente
+    # normaliza pra [] antes de chamar o client; "sem tools" == lista vazia, não None.
+    assert "tools" not in kwargs or not kwargs["tools"]
 
 
 def test_despachar_turno_com_conn_liga_tools_pro_agente_agenda():
@@ -181,4 +183,4 @@ def test_despachar_turno_com_conn_nao_liga_tools_pra_confirmacao_ainda():
         _resultado(rota_agente=4, base={"_sub_rota_agenda": "confirmacao"}), [], base_mc={}, client=client, conn=conn,
     )
     kwargs = client.beta.chat.completions.parse.call_args.kwargs
-    assert "tools" not in kwargs or kwargs["tools"] is None
+    assert "tools" not in kwargs or not kwargs["tools"]

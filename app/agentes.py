@@ -90,7 +90,11 @@ def chamar_agente(
 
     for _ in range(MAX_TOOL_TURNS):
         completion = client.beta.chat.completions.parse(
-            model=model, messages=msgs, response_format=RespostaAgente, tools=tools,
+            # `tools=tools or []`: o SDK real da OpenAI itera `tools` incondicionalmente em
+            # `_validate_input_tools` — `tools=None` quebra com `TypeError: 'NoneType' object is
+            # not iterable` (só apareceu no smoke test real em produção, 13/07/2026; os 821
+            # testes mockam o client, então nunca exercitaram essa validação do SDK de verdade).
+            model=model, messages=msgs, response_format=RespostaAgente, tools=tools or [],
         )
         msg = completion.choices[0].message
         # `tools` só é checado quando o CHAMADOR passou tools de verdade — sem isso, um
