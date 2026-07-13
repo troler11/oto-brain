@@ -27,6 +27,16 @@ _RE_CORRECAO = re.compile(
     re.IGNORECASE,
 )
 
+# Desfecho de sucesso (confirmação de presença/agendamento, lembrete) — a sessão termina com o
+# bot falando por último porque nada mais precisa ser dito, não porque o paciente desistiu.
+# FIX_DESISTENCIA_FALSO_POSITIVO (13/07): achado na 1ª revisão manual — casos como "Prontinho!
+# Presença confirmada ✅ Até lá!" caíam em desistência só por serem a última msg da sessão.
+_RE_DESFECHO_SUCESSO = re.compile(
+    r"presença confirmada|consulta (agendada|confirmada|cancelada)|"
+    r"cancelad[ao] com sucesso|agendad[ao] com sucesso|prontinho.*confirmad",
+    re.IGNORECASE,
+)
+
 
 def _normalizar(texto: str | None) -> str:
     return re.sub(r"\s+", " ", (texto or "")).strip().lower()[:60]
@@ -81,7 +91,11 @@ def minerar_telefone(telefone: str, msgs: list[dict], tem_agendamento: bool) -> 
     # com pergunta do bot sem resposta, e nunca virou agendamento.
     if sessoes and not tem_agendamento:
         ultima = sessoes[-1]
-        if ultima and ultima[-1]["origem"] == "ia_ou_recepcao":
+        if (
+            ultima
+            and ultima[-1]["origem"] == "ia_ou_recepcao"
+            and not _RE_DESFECHO_SUCESSO.search(ultima[-1]["texto"] or "")
+        ):
             casos.append({
                 "telefone": telefone,
                 "categoria": "desistencia",
