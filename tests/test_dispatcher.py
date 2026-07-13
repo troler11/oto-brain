@@ -121,3 +121,39 @@ def test_despachar_turno_chama_agente_certo_e_retorna_par():
     kwargs = client.beta.chat.completions.parse.call_args.kwargs
     assert "FASE3_STRUCTURED_OUTPUT" in kwargs["messages"][0]["content"]
     assert "{{" not in kwargs["messages"][0]["content"]
+
+
+# ---------- despachar_turno + tools de agenda (Fase 3 peça C, 13/07/2026) ----------
+
+def test_despachar_turno_sem_conn_nao_liga_tools_mesmo_pra_agenda():
+    esperado = RespostaAgente(mensagem="ok", estado=EstadoConsulta(i="agenda"))
+    client = _mock_client(esperado)
+    despachar_turno(_resultado(rota_agente=4), [], base_mc={}, client=client)
+    kwargs = client.beta.chat.completions.parse.call_args.kwargs
+    assert "tools" not in kwargs or kwargs["tools"] is None
+
+
+def test_despachar_turno_com_conn_liga_tools_pro_agente_agenda():
+    esperado = RespostaAgente(mensagem="ok", estado=EstadoConsulta(i="agenda"))
+    client = _mock_client(esperado)
+    # sem tool_calls (resposta final direto) — precisa setar explícito, senão o MagicMock
+    # auto-cria `.tool_calls` truthy e o loop de tool-calling nunca para (ver app.agentes).
+    client.beta.chat.completions.parse.return_value.choices[0].message.tool_calls = None
+    conn = MagicMock()
+    despachar_turno(_resultado(rota_agente=4), [], base_mc={}, client=client, conn=conn)
+    kwargs = client.beta.chat.completions.parse.call_args.kwargs
+    nomes = {t["function"]["name"] for t in kwargs["tools"]}
+    assert nomes == {"buscar_agenda", "navegar_agenda"}
+
+
+def test_despachar_turno_com_conn_nao_liga_tools_pro_agente_navegacao():
+    # "Agente Navegacao" tem tools com o MESMO nome no n8n mas sub-workflow ainda não
+    # confirmado como sendo o mesmo — não deve ganhar as tools por engano.
+    esperado = RespostaAgente(mensagem="ok", estado=EstadoConsulta(i="navegacao"))
+    client = _mock_client(esperado)
+    conn = MagicMock()
+    despachar_turno(
+        _resultado(rota_agente=4, base={"_sub_rota_agenda": "navegacao"}), [], base_mc={}, client=client, conn=conn,
+    )
+    kwargs = client.beta.chat.completions.parse.call_args.kwargs
+    assert "tools" not in kwargs or kwargs["tools"] is None

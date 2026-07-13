@@ -28,12 +28,21 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
+import httpx
+import psycopg
 from openai import OpenAI
 
 from app.agentes import RespostaAgente, chamar_agente
 from app.er import ResultadoER
 from app.regras_clinica import aplicar_regras
 from app.template_engine import renderizar
+from app.tools_agenda import TOOLS_AGENDA, construir_executores
+
+# Agentes que ganham as tools reais de agenda (buscar_agenda/navegar_agenda) quando `conn` é
+# passado — só "agenda" (prompt agente_agenda.txt) confirmado via get_workflow_details 13/07/2026
+# como dono dessas duas tools; "navegacao"/"confirmacao"/"executor" ainda não investigados (podem
+# ter sub-workflows diferentes com o mesmo nome de tool — não assumir).
+_AGENTES_COM_TOOLS_AGENDA = {"agenda"}
 
 PASTA_PROMPTS = Path(__file__).resolve().parent.parent / "prompts"
 
@@ -93,6 +102,8 @@ def despachar_turno(
     base_mc: dict,
     n_pacientes: int = 0,
     client: OpenAI | None = None,
+    conn: psycopg.Connection | None = None,
+    tisaude_client: httpx.Client | None = None,
 ) -> tuple[str, RespostaAgente] | None:
     """Escolhe o agente pro turno, resolve as expressões `{{ ... }}` do prompt (`app.
     template_engine`, `$json` = `resultado.base`, `$('Montar Contexto')` = `base_mc`) e chama
@@ -104,10 +115,21 @@ def despachar_turno(
     Extrair Rota — é o que os refs `$('Montar Contexto')...` dos prompts esperam. Na rota=4
     (agenda), `resultado.base` já deve vir enriquecido por `app.injetar_contexto_agendamento` +
     `app.preparar_input_agenda` antes de chegar aqui — fiação de quem monta o pipeline
-    completo, não desta função."""
+    completo, não desta função.
+
+    `conn` (13/07/2026, Fase 3 peça C): quando passado E o agente é um dos
+    `_AGENTES_COM_TOOLS_AGENDA`, liga as tools reais `buscar_agenda`/`navegar_agenda`
+    (`app.tools_agenda`) no loop de function-calling — sem `conn` (todo o resto/testes
+    existentes), comportamento idêntico a antes, sem tools."""
     agente = escolher_agente(resultado, n_pacientes)
     if agente is None:
         return None
     prompt = renderizar(carregar_prompt(agente), base_mc, resultado.base)
-    resposta = chamar_agente(prompt, mensagens, client=client)
+    if conn is not None and agente in _AGENTES_COM_TOOLS_AGENDA:
+        resposta = chamar_agente(
+            prompt, mensagens, client=client, tools=TOOLS_AGENDA,
+            executores=construir_executores(conn, tisaude_client),
+        )
+    else:
+        resposta = chamar_agente(prompt, mensagens, client=client)
     return agente, resposta

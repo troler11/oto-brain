@@ -26,17 +26,21 @@ def route(turno: RouteIn) -> RouteOut:
         historico = carregar_historico_conversa(conn, turno.telefone)
         memoria_paciente = carregar_memoria_paciente(conn, turno.telefone)
 
-    resultado = processar_turno(
-        busca_paciente_id1=turno.busca_paciente_id1,
-        busca_paciente_telefone=turno.busca_paciente_telefone,
-        extrair_medico_timeline=turno.extrair_medico_timeline,
-        sessao=sessao,
-        whatsapp_info=turno.whatsapp_info,
-        mensagem_agrupada=turno.mensagem_agrupada,
-        historico=historico,
-        has_media=turno.has_media,
-        memoria_paciente=memoria_paciente,
-    )
+        # conn segue aberta pro agente "agenda" poder chamar as tools reais
+        # (buscar_agenda/navegar_agenda, app.tools_agenda) durante processar_turno — antes a
+        # conexão fechava aqui, antes de existir tool-calling (13/07/2026, Fase 3 peça C).
+        resultado = processar_turno(
+            busca_paciente_id1=turno.busca_paciente_id1,
+            busca_paciente_telefone=turno.busca_paciente_telefone,
+            extrair_medico_timeline=turno.extrair_medico_timeline,
+            sessao=sessao,
+            whatsapp_info=turno.whatsapp_info,
+            mensagem_agrupada=turno.mensagem_agrupada,
+            historico=historico,
+            has_media=turno.has_media,
+            memoria_paciente=memoria_paciente,
+            conn=conn,
+        )
     return RouteOut(
         mensagem=resultado.mensagem,
         intencao=resultado.intencao,

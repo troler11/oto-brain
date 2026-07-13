@@ -13,6 +13,11 @@ intencao`/`chamar_agente`, via `openai_client` injetável) faz IO de verdade. Qu
 histórico no Postgres é `app.main` (o endpoint HTTP), não este módulo — mesma separação
 pura/IO do resto do port (ex.: `app.er` vs `scripts/replay_offline.py`).
 
+`conn` (13/07/2026, Fase 3 peça C): opcional, só repassado até `app.dispatcher.despachar_turno`
+pro agente "agenda" ligar as tools reais `buscar_agenda`/`navegar_agenda` (`app.tools_agenda`) —
+sem `conn`, comportamento idêntico a antes (sem tool-calling). `app.main` precisa manter a
+conexão aberta durante `processar_turno()` agora (antes fechava antes de chamar).
+
 rota_agente == 5 (confirmar presença) é 100% determinístico (`app.formatar_verificar_confirmar`,
 orquestrado por `app.confirmar_presenca_fluxo`), ligado à tool TiSaude real desde 13/07/2026 —
 mas só LEITURA (buscar consultas): a mutação real (`tisaude.confirmar_presenca`) fica pendente
@@ -29,6 +34,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 
 import httpx
+import psycopg
 from openai import OpenAI
 
 from app import confirmar_presenca_fluxo, dispatcher, eif1, er, injetar_contexto_agendamento, montar_contexto, preparar_input_agenda, state_validator
@@ -61,6 +67,7 @@ def processar_turno(
     memoria_paciente: dict | None = None,
     openai_client: OpenAI | None = None,
     tisaude_client: httpx.Client | None = None,
+    conn: psycopg.Connection | None = None,
 ) -> ResultadoTurno:
     mc = montar_contexto.processar(
         busca_paciente_id1, busca_paciente_telefone, extrair_medico_timeline,
@@ -110,6 +117,7 @@ def processar_turno(
     # caso, escolher_agente() sempre resolve pra algum agente.
     agente, resposta = dispatcher.despachar_turno(
         r_para_dispatch, historico, base_mc=base_mc, n_pacientes=n_pacientes, client=openai_client,
+        conn=conn, tisaude_client=tisaude_client,
     )
     raw = empacotar_para_eif1(resposta)
     resultado_eif1 = eif1.processar(raw, extrair_rota=base_agente, carregar_sessao=sessao)
