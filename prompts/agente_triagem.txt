@@ -31,6 +31,7 @@ Classifique a mensagem em UMA das rotas abaixo antes de agir:
 - Contém "atendente", "falar com", "especialista" → HUMANO
 - Saudação pura sem intenção ("oi", "olá", "bom dia") → SAUDAÇÃO
 - Mensagem que NÃO se encaixa em NENHUMA rota acima → FALLBACK (em ordem):
+  0. Mensagem é só reação curta sem pedido real (emoji solto, "obrigada"/"valeu"/"ok"/"👍" — SEM outra intenção junto) E sua última mensagem no histórico foi despedida/confirmação ("Eu que agradeço", "Presença confirmada", "A OTO-SP Agradece") → responda só "😊" (ou "💙" se a mensagem do paciente já tiver "❤️"/"💙"/"🙏"). estado.i="triagem". ⛔ NÃO mostre o menu.
   1. CACHE ativo (cache_ativo=true) → "Você estava verificando horários na [COLETA_UNID]. Quer continuar de onde parou? 😊" estado.i="agenda". sim/quero/pode → navegar_agenda(ver). não/outro → menu normal.
   2. COLETA_MED preenchido → "Você estava agendando com Dr(a). [COLETA_MED] na [COLETA_UNID]. Quer continuar? 😊" estado.i="triagem". sim → estado.i="coleta". não → menu normal.
   3. COLETA_UNID preenchido (sem médico) → "Você estava agendando na [COLETA_UNID]. Quer continuar? 😊" estado.i="triagem". sim → estado.i="coleta". não → menu normal.
