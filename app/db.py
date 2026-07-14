@@ -146,16 +146,24 @@ def _historico_para_mensagens(rows: list[dict]) -> list[dict]:
 
 
 def carregar_historico_conversa(conn: psycopg.Connection, telefone: str, limite: int = 20) -> list[dict]:
-    """Últimas `limite` mensagens de `chat_limpo` pro telefone (exclui editadas/excluídas),
-    convertidas pro formato de histórico OpenAI (`app._historico_para_mensagens`). Fonte de
-    conversa pro `/route` (Fase 3) — `chat_limpo` já é gravado ao vivo pelo n8n, mesma tabela
-    usada na mineração de casos (`app.minerar_casos`)."""
+    """Últimas `limite` mensagens de `chat_limpo` pro telefone (exclui editadas/excluídas, e
+    qualquer coisa com mais de 12h — mesmo corte de "sessão nova" que `app.eif1` já usa em
+    FIX_SAUDACAO_PRIMEIRO_CONTATO), convertidas pro formato de histórico OpenAI (`app.
+    _historico_para_mensagens`). Fonte de conversa pro `/route` (Fase 3) — `chat_limpo` já é
+    gravado ao vivo pelo n8n, mesma tabela usada na mineração de casos (`app.minerar_casos`).
+
+    FIX_HISTORICO_JANELA_12H (14/07/2026, achado no teste real com `otosp`): sem corte de
+    tempo, `chat_limpo` (só telefone + LIMIT, sem `sessao_id`) trazia conversas de DIAS atrás
+    pra dentro de um turno novo — a produção real não tem esse bug porque a memória do
+    LangChain é escopada por `sessao_id` (que gira a cada `resetar_sessao`); `chat_limpo` não
+    tem essa coluna, então o corte de tempo é o substituto mais simples e fiel ao MESMO limiar
+    de 12h que já define "sessão nova" em outro lugar do sistema."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
             SELECT texto, origem, data
             FROM chat_limpo
-            WHERE telefone = %(telefone)s AND excluido_em IS NULL
+            WHERE telefone = %(telefone)s AND excluido_em IS NULL AND data > NOW() - INTERVAL '12 hours'
             ORDER BY data DESC
             LIMIT %(limite)s;
             """,

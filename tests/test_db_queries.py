@@ -75,6 +75,16 @@ def test_carregar_historico_converte_origem_pra_role_e_reordena_cronologico():
     assert params == {"telefone": "5511999999999", "limite": 20}
 
 
+def test_carregar_historico_corta_por_12h():
+    # FIX_HISTORICO_JANELA_12H: chat_limpo não tem sessao_id pra escopar por sessão, o corte de
+    # tempo (mesmo limiar de "sessão nova" de app.eif1) é o substituto.
+    conn, cur = _mock_conn()
+    cur.fetchall.return_value = []
+    carregar_historico_conversa(conn, "5511999999999")
+    sql = cur.execute.call_args.args[0]
+    assert "NOW() - INTERVAL '12 hours'" in sql
+
+
 def test_carregar_historico_respeita_limite_customizado():
     conn, cur = _mock_conn()
     cur.fetchall.return_value = []
