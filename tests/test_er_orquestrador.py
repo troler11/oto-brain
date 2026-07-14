@@ -75,6 +75,19 @@ def test_encaixe_early_guard_ainda_funciona_via_orquestrador():
     assert r.motivo_humano == "Paciente pediu encaixe"
 
 
+# ---------- FIX_EH_NAVEGACAO_BASE (13/07/2026) ----------
+
+def test_eh_navegacao_da_mini_ia_sobrevive_em_base():
+    b = _base(sessao_intencao="agenda", sessao_rota=4, cache_ativo=True)
+    r = _run("mostra o próximo dia", base=b, ia_output_raw='{"intencao_rapida": "agenda", "rota_agente": 4, "eh_navegacao": true}')
+    assert r.base["eh_navegacao"] is True
+
+
+def test_eh_navegacao_ausente_vira_false_em_base_nao_none():
+    r = _run("oi")
+    assert r.base["eh_navegacao"] is False
+
+
 # ---------- deve_resetar_sessao / shadow_check (FIX_DEVE_RESETAR, fechado 12/07) ----------
 
 def test_shadow_check_bypass_false_quando_nenhum_guard_preia_dispara():

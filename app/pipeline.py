@@ -47,9 +47,9 @@ determinístico, checa `eh_navegacao`/`eh_troca_data` logo após o corte de rota
 `conn` (Postgres) — sem `conn`, comportamento idêntico a antes (pula o atalho, vai direto pro
 despacho normal). Diferente dos outros atalhos: TEM fallback pro agente completo quando o cache
 está vazio/esgotado (`None` do módulo = cai pro despacho normal), fiel ao node real
-('Precisa Buscar?' -> 'Roteador'). ⚠️ Na prática, só o ramo TROCA dispara hoje — o ramo
-NAVEGAÇÃO depende de `eh_navegacao` sobreviver em `r.base`, o que `app.er` ainda não faz (gap
-pré-existente, ver docstring de `app.navegacao_direta_fluxo`).
+('Precisa Buscar?' -> 'Roteador'). Ambos os ramos (Navegação e Troca) disparam na prática desde
+13/07/2026 (`FIX_EH_NAVEGACAO_BASE` em `app.er.processar()` — ver docstring de
+`app.navegacao_direta_fluxo`).
 """
 
 from __future__ import annotations

@@ -12,19 +12,14 @@ Gatilhos (setados em `Extrair Rota`, já portados em `app.er`/`app.agentes`):
   - `eh_troca_data` — 100% determinístico, nasce só dentro de `app.er` (regras de troca de
     período/dia da semana com cache ativo).
 
-⚠️ ACHADO (13/07/2026, validado com `processar_turno()` de ponta a ponta antes de fechar este
-port): `eh_navegacao` da Mini IA é rastreado por `app.er.processar_intake` num dict `ia_output`
-SEPARADO de `base` (`ia_output["eh_navegacao"] = ...` em vários pontos, nunca `base["eh_navegacao"]
-= ...`) — esse dict nunca é fundido de volta em `base` em lugar nenhum do `app.er.processar()`.
-Resultado: `r.base.get("eh_navegacao")` é sempre `None`/falsy hoje, então o RAMO NAVEGAÇÃO deste
-módulo (via `_detectar_navegacao_final()`) nunca dispara na prática — gap PRÉ-EXISTENTE em
-`app.er`, não introduzido aqui, fora do escopo desta port (mexer nisso é decisão separada, toca
-um arquivo de 6000+ linhas já testado com 259 casos). `eh_troca_data`, por ser setado direto em
-`base` (não em `ia_output`), sobrevive normalmente — confirmado com probe real via
-`processar_turno()`. O RAMO TROCA deste módulo está 100% funcional; o ramo Navegação está com
-código pronto e testado isoladamente, mas inalcançável até alguém corrigir `app.er` pra fundir
-`ia_output` em `base` (ou expor `eh_navegacao` como campo de primeira classe, igual
-`rota_agente`/`intencao_rapida` já são).
+✅ FIX_EH_NAVEGACAO_BASE (13/07/2026): `eh_navegacao` da Mini IA era rastreado por
+`app.er.processar_intake` só num dict `ia_output` SEPARADO de `base`, nunca fundido de volta —
+`r.base.get("eh_navegacao")` era sempre `None`/falsy, então este ramo nunca disparava na
+prática. Corrigido em `app.er.processar()` (fim do orquestrador): `base["eh_navegacao"] =
+bool(ia_output.get("eh_navegacao"))`, exposto como campo de primeira classe (mesmo padrão de
+`rota_agente`/`intencao_rapida`) — 1 linha, sem tocar nas 14 partes internas do arquivo de
+6000+ linhas. 828/828 testes + replay verdes depois do fix. Ambos os ramos (Navegação e Troca)
+estão 100% funcionais agora.
 
 RAMO NAVEGAÇÃO: `_parsear_acao_navegar()` (parsing de texto livre: "dia NN[/MM]", "amanhã", nome
 de dia da semana, "voltar/antes/anterior/mais cedo", default "avancar") → `navegar_agenda.

@@ -6257,6 +6257,14 @@ def processar(
     else:
         shadow_check = {"bypass": False}
 
+    # FIX_EH_NAVEGACAO_BASE: `eh_navegacao` só era escrito em `ia_output` (Partes 2-14), nunca em
+    # `base` — diferente de `eh_troca_data`, que os pontos que o setam gravam direto em `base`.
+    # No node JS original os dois viram campos do MESMO objeto de saída; aqui exponho como campo
+    # de primeira classe (mesmo padrão já usado pra rota_agente/intencao_rapida) pra
+    # `app.navegacao_direta_fluxo._detectar_navegacao_final()` conseguir ler o valor final —
+    # sem isso o ramo Navegação nunca disparava (gap documentado 13/07/2026).
+    base["eh_navegacao"] = bool(ia_output.get("eh_navegacao"))
+
     return ResultadoER(
         base=base,
         intencao_rapida=intencao_rapida,
