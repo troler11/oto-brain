@@ -49,3 +49,19 @@ class RouteOut(BaseModel):
     agente_usado: str | None
     deve_resetar_sessao: bool
     dados: dict[str, Any] = {}
+    base_final: dict[str, Any] = {}
+
+
+class FilaHumanaIn(BaseModel):
+    """Corpo do endpoint /fila-humana — n8n chama depois de /route quando `dados.dados.i` (ou
+    `dados.intencao`) vier 'humano', repassando o que /route acabou de devolver (evita rodar o
+    agente de novo). `base` = `RouteOut.base_final`; `extrair_intencao_final` = `RouteOut.dados`
+    (mesmo shape de `resultado_eif1.to_dict()`, ver app.fila_humana.montar_params_cria_fila).
+    `agente_humano_output` é opcional — sem ele, motivo_humano cai no fallback de `extrair_
+    intencao_final`/`base` (ver docstring de app.fila_humana), fiel ao try/catch original."""
+
+    telefone: str
+    whatsapp_info: dict[str, Any] | None = None
+    base: dict[str, Any] = {}
+    extrair_intencao_final: dict[str, Any] | None = None
+    agente_humano_output: str | None = None

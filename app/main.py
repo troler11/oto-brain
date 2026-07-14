@@ -2,9 +2,18 @@ import logging
 
 from fastapi import FastAPI
 
-from app.db import carregar_historico_conversa, carregar_memoria_paciente, carregar_sessao, get_connection, gravar_turno
+from app import fila_humana
+from app.db import (
+    carregar_historico_conversa,
+    carregar_memoria_paciente,
+    carregar_sessao,
+    criar_fila,
+    get_connection,
+    gravar_turno,
+    resetar_sessao_humano,
+)
 from app.pipeline import processar_turno
-from app.schemas import LogTurnoIn, RouteIn, RouteOut
+from app.schemas import FilaHumanaIn, LogTurnoIn, RouteIn, RouteOut
 
 logger = logging.getLogger("oto-brain")
 
@@ -50,7 +59,26 @@ def route(turno: RouteIn) -> RouteOut:
         agente_usado=resultado.agente_usado,
         deve_resetar_sessao=resultado.deve_resetar_sessao,
         dados=resultado.dados,
+        base_final=resultado.base_final,
     )
+
+
+@app.post("/fila-humana")
+def fila_humana_endpoint(corpo: FilaHumanaIn) -> dict:
+    """Port fiel do trecho 'Roteador1' (ramo 'humano') -> 'Resetar Sessao (Humano)' -> 'Cria
+    fila' — n8n chama depois de /route, quando a intenção final da rodada é 'humano' (ver
+    docstring de FilaHumanaIn). Mutação real de Postgres (fila visível pra atendente) — ao
+    contrário de /log-turno, erro aqui propaga como 5xx, não é engolido."""
+    params = fila_humana.montar_params_cria_fila(
+        corpo.base,
+        whatsapp_info=corpo.whatsapp_info or {},
+        extrair_intencao_final=corpo.extrair_intencao_final,
+        agente_humano_output=corpo.agente_humano_output,
+    )
+    with get_connection() as conn:
+        resetar_sessao_humano(conn, corpo.telefone)
+        criar_fila(conn, params)
+    return {"status": "ok"}
 
 
 @app.post("/log-turno")
